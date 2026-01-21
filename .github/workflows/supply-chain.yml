@@ -1,0 +1,47 @@
+name: Supply Chain CI/CD
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.33.1
+
+      - name: Run Security Scans
+        run: |
+          trivy fs --severity HIGH,CRITICAL --exit-code 1 src/
+
+      - name: Build Docker Image with Attestation
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/docker
+          push: false
+          tags: ghcr.io/${{ github.repository_owner }}/rock-paper-scissors:${{ github.sha }}
+          provenance: true
+          sbom: true
+
+      - name: Sign Image and Attestations
+        uses: sigstore/cosign-action@v2
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/rock-paper-scissors:${{ github.sha }}
+          attestations: ./attestations
