@@ -1,47 +1,212 @@
-name: Supply Chain CI/CD
+name: Supply Chain Pipeline
 
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   id-token: write
   contents: read
   packages: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: rock-paper-scissors
+
 jobs:
-  build-and-scan:
+  prep_and_scan:
+    name: Prep & Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Setup Task runner
+        uses: arduino/setup-task@v1
+
+      - name: Prepare Buildx
+        uses: docker/setup-buildx-action@v3
         with:
-          python-version: 3.11
+          install: true
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Tooling image build
+        run: docker build -t supply-chain-tools -f tools/Dockerfile .
 
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.33.1
+      - name: Install Trivy scanner
+        uses: aquasecurity/setup-trivy@v0.19.0
+        with:
+          version: '0.65.0'
 
-      - name: Run Security Scans
+      - name: Run baseline scans
+        run: task scan-all
+
+      - name: Build with SBOM + provenance (local artifacts)
+        run: task build-image-with-attestation
+
+      - name: Extract attestation predicates
         run: |
-          trivy fs --severity HIGH,CRITICAL --exit-code 1 src/
+          sudo apt-get update
+          sudo apt-get install -y jq
+          mkdir -p attestations
+          jq .predicate out/provenance.json | tee attestations/provenance.json
+          jq '.predicate' out/sbom.spdx.json > attestations/sbom.json
 
-      - name: Build Docker Image with Attestation
+      - name: Validate provenance
+        run: task validate:provenance
+
+      - name: Validate SBOM
+        run: task validate:sbom
+
+      - name: Build app image (for vuln scan)
+        run: task build-image
+
+      - name: Generate vulnerability attestations
+        run: |
+          mkdir -p attestations
+          task exec -- trivy fs --format cosign-vuln src/ > attestations/vuln-source.json
+          task exec -- trivy config --format cosign-vuln src/iac/ > attestations/vuln-iac.json
+          task exec -- trivy image --format cosign-vuln supply-chain-app:latest > attestations/vuln-image.json
+
+      - name: Validate all generated attestations
+        run: task validate:all-attestations
+
+      - name: Upload attestation bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestations
+          path: attestations/
+
+  build_and_push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    needs: prep_and_scan
+    env:
+      IMAGE: ghcr.io/${{ toLower(github.repository_owner) }}/${{ env.IMAGE_NAME }}
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      image_ref: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image ref
+        id: meta
+        run: |
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Docker Buildx (push with provenance + SBOM)
+        id: push
         uses: docker/build-push-action@v5
         with:
-          context: ./src/docker
-          push: false
-          tags: ghcr.io/${{ github.repository_owner }}/rock-paper-scissors:${{ github.sha }}
-          provenance: true
+          context: ./src
+          file: ./src/docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
           sbom: true
 
-      - name: Sign Image and Attestations
-        uses: sigstore/cosign-action@v2
+  sign_and_verify:
+    name: Sign & Verify
+    runs-on: ubuntu-latest
+    needs: build_and_push
+    env:
+      IMAGE_REF: ${{ needs.build_and_push.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.digest }}
+    steps:
+      - name: Download attestation bundle
+        uses: actions/download-artifact@v4
         with:
-          image: ghcr.io/${{ github.repository_owner }}/rock-paper-scissors:${{ github.sha }}
-          attestations: ./attestations
+          name: attestations
+          path: attestations
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v2
+        with:
+          cosign-release: 'v2.4.0'
+
+      - name: Sign container (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          echo "Signing ${IMAGE_REF}"
+          cosign sign --yes "${IMAGE_REF}"
+
+      - name: Attach attestations (5 types)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          for TYPE in provenance sbom vuln-source vuln-iac vuln-image; do
+            case $TYPE in
+              provenance) PRED=attestations/provenance.json; T=https://slsa.dev/provenance/v0.2 ;;
+              sbom) PRED=attestations/sbom.json; T=https://spdx.dev/Document ;;
+              vuln-source) PRED=attestations/vuln-source.json; T=https://cosign.dev/attestation/vuln/source ;;
+              vuln-iac) PRED=attestations/vuln-iac.json; T=https://cosign.dev/attestation/vuln/iac ;;
+              vuln-image) PRED=attestations/vuln-image.json; T=https://cosign.dev/attestation/vuln/image ;;
+            esac
+            cosign attest --yes --type "$T" --predicate "$PRED" "${IMAGE_REF}"
+          done
+
+      - name: Verify signature
+        run: |
+          cosign verify --experimental-oci11 \
+            --certificate-identity-regexp="https://github.com/.+" \
+            --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
+            "${IMAGE_REF}"
+
+      - name: Verify attestations (all)
+        run: |
+          for TYPE in \
+            "https://slsa.dev/provenance/v0.2" \
+            "https://spdx.dev/Document" \
+            "https://cosign.dev/attestation/vuln/source" \
+            "https://cosign.dev/attestation/vuln/iac" \
+            "https://cosign.dev/attestation/vuln/image"; do
+            cosign verify-attestation --experimental-oci11 \
+              --type "$TYPE" \
+              --certificate-identity-regexp="https://github.com/.+" \
+              --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
+              "${IMAGE_REF}" > /dev/null
+          done
+          echo "✅ All 5 attestations verified."
+
+      - name: Check Rekor for expected entries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          HASH="${IMAGE_DIGEST#sha256:}"
+          echo "🔍 Searching Rekor for $HASH"
+          docker run --rm ghcr.io/sigstore/rekor-cli:latest search --sha "$HASH" --format json > rekor-output.json
+          cat rekor-output.json | jq
+          ENTRY_COUNT=$(jq length rekor-output.json)
+          if [ "$ENTRY_COUNT" -lt 6 ]; then
+            echo "❌ Rekor entry count less than 6)" && exit 1
+          fi
+          echo "✅ Rekor has at least 6 entries."
+
+      - name: Upload Rekor output
+        uses: actions/upload-artifact@v4
+        with:
+          name: rekor-output
+          path: rekor-output.json
+
