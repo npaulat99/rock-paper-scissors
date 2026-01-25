@@ -54,11 +54,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y trivy
 
+      - name: Ensure Trivy ignore file exists
+        run: |
+          if [ ! -f .trivyignore ]; then
+            echo "WARN: .trivyignore missing in checkout; creating empty file"
+            : > .trivyignore
+          fi
+          ls -la .trivyignore
+
       - name: Run baseline scans (Trivy fs/iac)
         run: |
           mkdir -p attestations
           # Scan repo root so dependency files (e.g. requirements.txt) are included
-          trivy fs --ignorefile .trivyignore --skip-dirs .git --skip-dirs attestations --format cosign-vuln . > attestations/vuln-source.json
+          trivy fs --ignorefile ./.trivyignore --skip-dirs .git --skip-dirs attestations --format cosign-vuln . > attestations/vuln-source.json
           if [ -d src/docker ]; then
             trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || true
           else
@@ -77,8 +85,8 @@ jobs:
 
       - name: Scan image and enforce HIGH/CRITICAL policy
         run: |
-          trivy image --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest
-          trivy image --ignorefile .trivyignore --format cosign-vuln rock-paper-scissors:latest > attestations/vuln-image.json
+          trivy image --ignorefile ./.trivyignore --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest
+          trivy image --ignorefile ./.trivyignore --format cosign-vuln rock-paper-scissors:latest > attestations/vuln-image.json
 
       - name: Upload attestation bundle
         uses: actions/upload-artifact@v4
