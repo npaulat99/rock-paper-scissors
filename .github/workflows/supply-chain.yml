@@ -21,6 +21,7 @@ defaults:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: rock-paper-scissors
+  TRIVY_DISABLE_VEX_NOTICE: "true"
 
 jobs:
   prep_and_scan:
@@ -88,6 +89,10 @@ jobs:
 
       - name: Build app image (for vuln scan)
         run: docker build --no-cache -t rock-paper-scissors:latest -f src/docker/Dockerfile .
+
+      - name: Show Python package versions in image
+        run: |
+          docker run --rm rock-paper-scissors:latest python -m pip show wheel jaraco.context || true
 
       - name: Scan image and enforce HIGH/CRITICAL policy
         run: |

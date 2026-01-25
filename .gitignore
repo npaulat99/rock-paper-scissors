@@ -1,0 +1,20 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Pipeline-generated artifacts
+attestations/
+rekor-output.json
