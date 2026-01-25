@@ -17,7 +17,6 @@ concurrency:
 defaults:
   run:
     shell: bash
-    working-directory: supply-chain-lab
 
 env:
   REGISTRY: ghcr.io
@@ -42,6 +41,7 @@ jobs:
           driver: docker-container
 
       - name: Tooling image build
+        working-directory: supply-chain-lab
         run: docker build -t supply-chain-tools -f tools/Dockerfile .
 
       - name: Install Trivy scanner
@@ -54,12 +54,15 @@ jobs:
           sudo apt-get install -y trivy
 
       - name: Run baseline scans
+        working-directory: supply-chain-lab
         run: task scan-all
 
       - name: Build with SBOM + provenance (local artifacts)
+        working-directory: supply-chain-lab
         run: task build-image-with-attestation
 
       - name: Extract attestation predicates
+        working-directory: supply-chain-lab
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
@@ -68,15 +71,19 @@ jobs:
           jq '.predicate' out/sbom.spdx.json > attestations/sbom.json
 
       - name: Validate provenance
+        working-directory: supply-chain-lab
         run: task validate:provenance
 
       - name: Validate SBOM
+        working-directory: supply-chain-lab
         run: task validate:sbom
 
       - name: Build app image (for vuln scan)
+        working-directory: supply-chain-lab
         run: task build-image
 
       - name: Generate vulnerability attestations
+        working-directory: supply-chain-lab
         run: |
           mkdir -p attestations
           task exec -- trivy fs --format cosign-vuln src/ > attestations/vuln-source.json
@@ -84,19 +91,21 @@ jobs:
           task exec -- trivy image --format cosign-vuln supply-chain-app:latest > attestations/vuln-image.json
 
       - name: Enforce HIGH/CRITICAL policy
+        working-directory: supply-chain-lab
         run: |
           trivy fs --severity HIGH,CRITICAL --exit-code 1 src/
           trivy config --severity HIGH,CRITICAL --exit-code 1 src/iac/
           trivy image --severity HIGH,CRITICAL --exit-code 1 supply-chain-app:latest
 
       - name: Validate all generated attestations
+        working-directory: supply-chain-lab
         run: task validate:all-attestations
 
       - name: Upload attestation bundle
         uses: actions/upload-artifact@v4
         with:
           name: attestations
-          path: attestations/
+          path: supply-chain-lab/attestations/
 
   build_and_push:
     name: Build & Push
@@ -128,8 +137,8 @@ jobs:
         id: push
         uses: docker/build-push-action@v5
         with:
-          context: ./src
-          file: ./src/docker/Dockerfile
+          context: ./supply-chain-lab/src
+          file: ./supply-chain-lab/src/docker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.image }}:latest
           cache-from: type=gha
@@ -149,7 +158,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: attestations
-          path: attestations
+          path: supply-chain-lab/attestations
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v2
@@ -159,6 +168,7 @@ jobs:
       - name: Sign container (keyless)
         env:
           COSIGN_EXPERIMENTAL: "true"
+        working-directory: supply-chain-lab
         run: |
           echo "Signing ${IMAGE_REF}"
           cosign sign --yes "${IMAGE_REF}"
@@ -166,6 +176,7 @@ jobs:
       - name: Attach attestations (5 types)
         env:
           COSIGN_EXPERIMENTAL: "true"
+        working-directory: supply-chain-lab
         run: |
           for TYPE in provenance sbom vuln-source vuln-iac vuln-image; do
             case $TYPE in
@@ -179,6 +190,7 @@ jobs:
           done
 
       - name: Verify signature
+        working-directory: supply-chain-lab
         run: |
           cosign verify --experimental-oci11 \
             --certificate-identity-regexp="https://github.com/.+" \
@@ -186,6 +198,7 @@ jobs:
             "${IMAGE_REF}"
 
       - name: Verify attestations (all)
+        working-directory: supply-chain-lab
         run: |
           for TYPE in \
             "https://slsa.dev/provenance/v0.2" \
@@ -202,6 +215,7 @@ jobs:
           echo "✅ All 5 attestations verified."
 
       - name: Check Rekor for expected entries
+        working-directory: supply-chain-lab
         run: |
           sudo apt-get update
           sudo apt-get install -y jq
@@ -219,4 +233,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rekor-output
-          path: rekor-output.json
+          path: supply-chain-lab/rekor-output.json
