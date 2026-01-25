@@ -281,7 +281,7 @@ jobs:
           rekor-cli version
           rekor-cli search --sha "$HASH" --format json > rekor-output.json
           cat rekor-output.json | jq
-          ENTRY_COUNT=$(jq length rekor-output.json)
+          ENTRY_COUNT=$(jq -r '.UUIDs | length' rekor-output.json)
           if [ "$ENTRY_COUNT" -lt 6 ]; then
             echo "❌ Rekor entry count less than 6)" && exit 1
           fi
