@@ -94,6 +94,18 @@ jobs:
         run: |
           docker run --rm rock-paper-scissors:latest python -m pip show wheel jaraco.context || true
 
+      - name: Check for duplicate dist-info metadata
+        run: |
+          docker run --rm rock-paper-scissors:latest bash -lc '
+            set -euo pipefail
+            echo "== /usr/local site-packages =="
+            ls -d /usr/local/lib/python*/site-packages/wheel-*.dist-info 2>/dev/null || true
+            ls -d /usr/local/lib/python*/site-packages/jaraco.context-*.dist-info 2>/dev/null || true
+            echo "== /usr/lib dist-packages =="
+            ls -d /usr/lib/python3/dist-packages/wheel-*.dist-info 2>/dev/null || true
+            ls -d /usr/lib/python3/dist-packages/jaraco.context-*.dist-info 2>/dev/null || true
+          '
+
       - name: Scan image and enforce HIGH/CRITICAL policy
         run: |
           trivy image --ignorefile ./.trivyignore --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest

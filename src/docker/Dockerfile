@@ -4,6 +4,8 @@ WORKDIR /app
 
 RUN apt-get update \
 	&& apt-get upgrade -y \
+	&& (apt-get purge -y python3-wheel python3-jaraco.context python3-jaraco-context || true) \
+	&& apt-get autoremove -y \
 	&& rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
