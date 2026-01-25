@@ -72,7 +72,7 @@ jobs:
           fi
 
       - name: Build app image (for vuln scan)
-        run: docker build -t rock-paper-scissors:latest -f src/docker/Dockerfile src
+        run: docker build -t rock-paper-scissors:latest -f src/docker/Dockerfile .
 
       - name: Scan image and enforce HIGH/CRITICAL policy
         run: |
@@ -115,7 +115,7 @@ jobs:
         id: push
         uses: docker/build-push-action@v5
         with:
-          context: ./src
+          context: .
           file: ./src/docker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.image }}:latest
