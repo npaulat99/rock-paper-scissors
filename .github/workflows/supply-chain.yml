@@ -9,8 +9,6 @@ permissions:
   id-token: write
   contents: read
   packages: write
-  attestations: write
-  artifact-metadata: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -151,28 +149,6 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      - name: Attest SLSA build provenance (registry)
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ steps.meta.outputs.image }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          push-to-registry: true
-
-      - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@v0
-        with:
-          image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
-          format: spdx-json
-          output-file: sbom.spdx.json
-
-      - name: Attest SBOM (registry)
-        uses: actions/attest-sbom@v3
-        with:
-          subject-name: ${{ steps.meta.outputs.image }}
-          subject-digest: ${{ steps.push.outputs.digest }}
-          sbom-path: sbom.spdx.json
-          push-to-registry: true
-
   sign_and_verify:
     name: Sign & Verify
     runs-on: ubuntu-latest
@@ -207,14 +183,57 @@ jobs:
           echo "Signing ${IMAGE_REF}"
           cosign sign --yes "${IMAGE_REF}"
 
-      - name: Attach vulnerability attestations (Trivy)
+      - name: Generate SLSA provenance predicate (local)
+        run: |
+          mkdir -p attestations
+          cat > attestations/provenance.slsa.json <<'JSON'
+          {
+            "builder": {
+              "id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            },
+            "buildType": "https://github.com/Attestations/GitHubActions@v1",
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}",
+                "digest": {"sha1": "${GITHUB_SHA}"}
+              },
+              "parameters": {
+                "workflow": "${GITHUB_WORKFLOW}",
+                "ref": "${GITHUB_REF}",
+                "runner": "${RUNNER_OS}"
+              }
+            },
+            "metadata": {
+              "buildInvocationId": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+              "buildStartedOn": "${GITHUB_RUN_ATTEMPT}",
+              "buildFinishedOn": "${GITHUB_RUN_ATTEMPT}"
+            },
+            "materials": [
+              {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}",
+                "digest": {"sha1": "${GITHUB_SHA}"}
+              }
+            ]
+          }
+          JSON
+
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE_REF }}
+          format: spdx-json
+          output-file: attestations/sbom.spdx.json
+
+      - name: Attach attestations (provenance, SBOM, vulnerabilities)
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          # Provenance + SBOM are already attached by docker/build-push-action (provenance/sbom settings).
-          # Here we attach the Trivy-based vuln attestations generated in prep_and_scan.
-          for TYPE in vuln-source vuln-dockerfile vuln-iac vuln-image; do
+          # NOTE: GitHub's `actions/attest-*` are not available for user-owned private repos.
+          # We attach provenance + SBOM as cosign attestations directly to the OCI registry instead.
+          for TYPE in provenance sbom vuln-source vuln-dockerfile vuln-iac vuln-image; do
             case $TYPE in
+              provenance) PRED=attestations/provenance.slsa.json; T=https://slsa.dev/provenance/v1 ;;
+              sbom) PRED=attestations/sbom.spdx.json; T=https://spdx.dev/Document ;;
               vuln-source) PRED=attestations/vuln-source.json; T=https://cosign.dev/attestation/vuln/source ;;
               vuln-dockerfile) PRED=attestations/vuln-dockerfile.json; T=https://cosign.dev/attestation/vuln/dockerfile ;;
               vuln-iac) PRED=attestations/vuln-iac.json; T=https://cosign.dev/attestation/vuln/iac ;;
@@ -230,9 +249,11 @@ jobs:
             --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
             "${IMAGE_REF}"
 
-      - name: Verify vulnerability attestations (cosign)
+      - name: Verify attestations (cosign)
         run: |
           for TYPE in \
+            "https://slsa.dev/provenance/v1" \
+            "https://spdx.dev/Document" \
             "https://cosign.dev/attestation/vuln/source" \
             "https://cosign.dev/attestation/vuln/dockerfile" \
             "https://cosign.dev/attestation/vuln/iac" \
@@ -243,22 +264,7 @@ jobs:
               --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
               "${IMAGE_REF}" > /dev/null
           done
-          echo "✅ All vulnerability attestations verified."
-
-      - name: Verify SLSA provenance + SBOM attestations (GitHub)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # These attestations are produced by GitHub's attestation actions and stored as OCI referrers.
-          # Verify them using the GitHub CLI (cosign verify-attestation is only for cosign-attested predicates).
-          gh attestation verify "oci://${IMAGE_REF}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --bundle-from-oci
-          gh attestation verify "oci://${IMAGE_REF}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --bundle-from-oci \
-            --predicate-type "https://spdx.dev/Document"
-          echo "✅ Provenance + SBOM attestations verified."
+          echo "✅ All attestations verified."
 
       - name: Check Rekor for expected entries
         run: |
