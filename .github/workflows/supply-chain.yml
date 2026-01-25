@@ -58,8 +58,18 @@ jobs:
         run: |
           mkdir -p attestations
           trivy fs --format cosign-vuln src/ > attestations/vuln-source.json
-          trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || true
-          trivy config --format cosign-vuln src/iac/ > attestations/vuln-iac.json
+          if [ -d src/docker ]; then
+            trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || true
+          else
+            echo '{}' > attestations/vuln-dockerfile.json
+            echo "skip: src/docker not found"
+          fi
+          if [ -d src/iac ]; then
+            trivy config --format cosign-vuln src/iac/ > attestations/vuln-iac.json || true
+          else
+            echo '{}' > attestations/vuln-iac.json
+            echo "skip: src/iac not found"
+          fi
 
       - name: Build app image (for vuln scan)
         run: docker build -t rock-paper-scissors:latest -f src/docker/Dockerfile src
