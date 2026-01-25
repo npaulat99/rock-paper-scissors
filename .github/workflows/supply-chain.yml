@@ -57,7 +57,8 @@ jobs:
       - name: Run baseline scans (Trivy fs/iac)
         run: |
           mkdir -p attestations
-          trivy fs --format cosign-vuln src/ > attestations/vuln-source.json
+          # Scan repo root so dependency files (e.g. requirements.txt) are included
+          trivy fs --ignorefile .trivyignore --skip-dirs .git --skip-dirs attestations --format cosign-vuln . > attestations/vuln-source.json
           if [ -d src/docker ]; then
             trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || true
           else
@@ -72,12 +73,12 @@ jobs:
           fi
 
       - name: Build app image (for vuln scan)
-        run: docker build -t rock-paper-scissors:latest -f src/docker/Dockerfile .
+        run: docker build --no-cache -t rock-paper-scissors:latest -f src/docker/Dockerfile .
 
       - name: Scan image and enforce HIGH/CRITICAL policy
         run: |
-          trivy image --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest
-          trivy image --format cosign-vuln rock-paper-scissors:latest > attestations/vuln-image.json
+          trivy image --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest
+          trivy image --ignorefile .trivyignore --format cosign-vuln rock-paper-scissors:latest > attestations/vuln-image.json
 
       - name: Upload attestation bundle
         uses: actions/upload-artifact@v4
