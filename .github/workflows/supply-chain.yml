@@ -17,6 +17,7 @@ concurrency:
 defaults:
   run:
     shell: bash
+    working-directory: supply-chain-lab
 
 env:
   REGISTRY: ghcr.io
