@@ -8,13 +8,3 @@
 #
 # Added: 2026-01-25
 #
-# NOTE: Remove these entries as soon as upstream publishes fixed packages.
-
-# glibc: Integer overflow in memalign leads to heap corruption
-CVE-2026-0861
-
-# sqlite: SQLite integer overflow
-CVE-2025-7458
-
-# zlib: integer overflow (Trivy may report will_not_fix on some distros)
-CVE-2023-45853
