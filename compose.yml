@@ -11,7 +11,5 @@ services:
       RPS_MTLS: "1"
       RPS_SPIFFE_ID: "spiffe://<your-domain>/game-server"
       RPS_CERT_DIR: "/app/certs"
-      SPIFFE_AGENT_SOCKET: "/tmp/spire-agent/public/api.sock"
     volumes:
-      - /tmp/spire-agent/public/api.sock:/tmp/spire-agent/public/api.sock
       - ./certs:/app/certs
