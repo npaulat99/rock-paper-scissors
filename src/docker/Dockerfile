@@ -8,7 +8,7 @@ RUN apt-get update \
 	&& apt-get autoremove -y \
 	&& rm -rf /var/lib/apt/lists/*
 
-ARG SPIFFE_HELPER_VERSION=0.11.0
+ARG SPIFFE_HELPER_VERSION=0.12.0
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates wget \
 	&& rm -rf /var/lib/apt/lists/* \
