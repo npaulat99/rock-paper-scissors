@@ -7,9 +7,17 @@ Federated Rock-Paper-Scissors game with SPIFFE mTLS authentication and supply ch
 ### Option 1: Download Pre-Built Signed Binary (Recommended)
 
 ```bash
+# Clone the repository (requires authentication for private repos)
+git clone https://github.com/npaulat99/rock-paper-scissors.git
+cd rock-paper-scissors
+
 # Download and verify the signed binary from GitHub Actions
-bash <(curl -s https://raw.githubusercontent.com/YOUR-USERNAME/rock-paper-scissors/main/scripts/download-and-verify-binary.sh)
+bash scripts/download-and-verify-binary.sh
 ```
+
+**Prerequisites:**
+- GitHub CLI (`gh`) installed and authenticated: `gh auth login`
+- Cosign installed: `curl -fsSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o cosign && chmod +x cosign && sudo mv cosign /usr/local/bin/`
 
 This script will:
 1. Download the latest binary from GitHub Actions artifacts
@@ -17,16 +25,21 @@ This script will:
 3. Extract the binary to a temporary directory
 4. Run a quick test
 
+**Optional:** Copy binary to your PATH:
+```bash
+sudo cp /tmp/tmp.*/rps-game /usr/local/bin/
+```
+
 ### Option 2: Docker Image
 
 ```bash
-docker pull ghcr.io/YOUR-USERNAME/rock-paper-scissors:latest
+docker pull ghcr.io/npaulat99/rock-paper-scissors:latest
 ```
 
 ### Option 3: Build from Source
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/rock-paper-scissors.git
+git clone https://github.com/npaulat99/rock-paper-scissors.git
 cd rock-paper-scissors
 pip install -r requirements.txt
 python src/app/cli.py --help
@@ -54,7 +67,7 @@ If you prefer manual steps:
 
 ```bash
 # 1. Download artifact from GitHub Actions
-gh run download <RUN_ID> --repo YOUR-USERNAME/rock-paper-scissors --name rps-game-binary
+gh run download <RUN_ID> --repo npaulat99/rock-paper-scissors --name rps-game-binary
 
 # 2. Verify signature
 cosign verify-blob \
@@ -103,7 +116,7 @@ sudo tee /opt/spire/server/server.conf > /dev/null <<'EOF'
 server {
   bind_address = "0.0.0.0"
   bind_port = "8081"
-  trust_domain = "YOUR-TRUST-DOMAIN.example.com"
+  trust_domain = "noah.inter-cloud-thi.de"
   data_dir = "/tmp/spire-server/data"
   log_level = "INFO"
 }
@@ -132,6 +145,10 @@ EOF
 ### 1.3 Configure SPIRE Agent
 
 ```bash
+# Get server trust bundle first
+cd ~/spire-1.13.3
+sudo ./bin/spire-server bundle show > /tmp/bootstrap-bundle.crt
+
 # Create agent config
 sudo tee /opt/spire/agent/agent.conf > /dev/null <<'EOF'
 agent {
@@ -140,7 +157,8 @@ agent {
   server_address = "127.0.0.1"
   server_port = "8081"
   socket_path = "/tmp/spire-agent/public/api.sock"
-  trust_domain = "YOUR-TRUST-DOMAIN.example.com"
+  trust_domain = "noah.inter-cloud-thi.de"
+  trust_bundle_path = "/tmp/bootstrap-bundle.crt"
 }
 
 plugins {
@@ -157,8 +175,6 @@ plugins {
   }
 }
 EOF
-
-# Replace YOUR-TRUST-DOMAIN with the same domain as server
 ```
 
 ### 1.4 Start SPIRE Server
@@ -179,7 +195,7 @@ sudo ./bin/spire-server healthcheck
 
 ```bash
 # Generate join token for agent
-TOKEN=$(sudo ./bin/spire-server token generate -spiffeID spiffe://YOUR-TRUST-DOMAIN.example.com/agent/myagent | grep Token | awk '{print $2}')
+TOKEN=$(sudo ./bin/spire-server token generate -spiffeID spiffe://noah.inter-cloud-thi.de/agent/myagent | grep Token | awk '{print $2}')
 
 # Start agent with join token
 sudo ./bin/spire-agent run -config /opt/spire/agent/agent.conf -joinToken $TOKEN &
@@ -202,10 +218,10 @@ Choose your workload SPIFFE ID (e.g., `/game-server-alice`):
 ```bash
 cd ~/spire-1.13.3
 
-# Register game workload (Unix UID selector - replace 1000 with your UID)
+# Register game workload (Unix UID selector)
 sudo ./bin/spire-server entry create \
-  -spiffeID spiffe://YOUR-TRUST-DOMAIN.example.com/game-server-alice \
-  -parentID spiffe://YOUR-TRUST-DOMAIN.example.com/agent/myagent \
+  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-alice \
+  -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
   -selector unix:uid:$(id -u)
 
 # Verify registration
@@ -214,46 +230,28 @@ sudo ./bin/spire-server entry show
 
 **Important:** The selector `unix:uid:$(id -u)` means any process running as your user can obtain this SVID.
 
-### 2.2 Install spiffe-helper
+### 2.2 Generate Certificates with SPIRE Agent API
+
+The game application will fetch certificates directly from the SPIRE agent using the go-spiffe library. No additional tools needed!
+
+**For testing that the workload can get certificates:**
 
 ```bash
-# Download spiffe-helper
-cd ~
-wget https://github.com/spiffe/spiffe-helper/releases/download/v0.9.2/spiffe-helper_0.9.2_linux_x86_64.tar.gz
-tar -xzf spiffe-helper_0.9.2_linux_x86_64.tar.gz
-sudo mv spiffe-helper /usr/local/bin/
-sudo chmod +x /usr/local/bin/spiffe-helper
-```
-
-### 2.3 Generate Certificates
-
-```bash
-# Create cert directory
+# Create cert directory (the game will use this)
 mkdir -p ~/certs
 
-# Create spiffe-helper config
-cat > ~/spiffe-helper.conf <<EOF
-agent_address = "/tmp/spire-agent/public/api.sock"
-cmd = ""
-cmd_args = ""
-cert_dir = "$HOME/certs"
-renew_signal = ""
-svid_file_name = "svid.pem"
-svid_key_file_name = "svid_key.pem"
-svid_bundle_file_name = "svid_bundle.pem"
-EOF
-
-# Fetch certificates
-spiffe-helper -config ~/spiffe-helper.conf &
-HELPER_PID=$!
-sleep 2
-kill $HELPER_PID
+# Test fetching SVID using SPIRE agent (run as your user, NOT sudo)
+SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
+  ~/spire-1.13.3/bin/spire-agent api fetch x509 \
+  -write ~/certs/
 
 # Verify certs exist
 ls -lh ~/certs/
 ```
 
-You should see `svid.pem`, `svid_key.pem`, and `svid_bundle.pem`.
+You should see `svid.0.pem`, `svid.0.key`, and `bundle.0.pem`.
+
+**Note:** The rock-paper-scissors Docker container will fetch certificates automatically when it runs - these manual steps are just for verification.
 
 ---
 
@@ -299,8 +297,8 @@ You should see both your trust domain and the peer's trust domain listed.
 ### 4.1 Pull Docker Image
 
 ```bash
-# Pull your team's image from GHCR (replace with your image)
-docker pull ghcr.io/YOUR-USERNAME/rock-paper-scissors:latest
+# Pull the image from GHCR
+docker pull ghcr.io/npaulat99/rock-paper-scissors:latest
 
 # Or build locally if you have the repo
 cd ~/rock-paper-scissors
@@ -314,10 +312,10 @@ docker build -f src/docker/Dockerfile -t rock-paper-scissors:latest .
 docker run -it --rm \
   --network host \
   -v ~/certs:/app/certs:ro \
-  ghcr.io/YOUR-USERNAME/rock-paper-scissors:latest \
+  ghcr.io/npaulat99/rock-paper-scissors:latest \
   serve \
   --bind 0.0.0.0:9002 \
-  --spiffe-id spiffe://YOUR-TRUST-DOMAIN.example.com/game-server-alice \
+  --spiffe-id spiffe://noah.inter-cloud-thi.de/game-server-alice \
   --mtls \
   --cert-dir /app/certs
 ```
@@ -336,10 +334,10 @@ docker run -it --rm \
 docker run -it --rm \
   --network host \
   -v ~/certs:/app/certs:ro \
-  ghcr.io/YOUR-USERNAME/rock-paper-scissors:latest \
+  ghcr.io/npaulat99/rock-paper-scissors:latest \
   play \
   --bind 0.0.0.0:9003 \
-  --spiffe-id spiffe://YOUR-TRUST-DOMAIN.example.com/game-server-alice \
+  --spiffe-id spiffe://noah.inter-cloud-thi.de/game-server-alice \
   --peer https://PEER-IP:9002 \
   --peer-id spiffe://PEER-TRUST-DOMAIN.example.com/game-server-bob \
   --public-url https://YOUR-PUBLIC-IP:9003 \
@@ -361,7 +359,7 @@ docker run -it --rm \
 # View your local scoreboard
 docker run -it --rm \
   -v ~/.rps:/root/.rps \
-  ghcr.io/YOUR-USERNAME/rock-paper-scissors:latest \
+  ghcr.io/npaulat99/rock-paper-scissors:latest \
   scores
 ```
 
@@ -378,8 +376,8 @@ cd ~/spire-1.13.3
 
 # Register second identity
 sudo ./bin/spire-server entry create \
-  -spiffeID spiffe://YOUR-TRUST-DOMAIN.example.com/game-server-bob \
-  -parentID spiffe://YOUR-TRUST-DOMAIN.example.com/agent/myagent \
+  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-bob \
+  -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
   -selector unix:uid:$(id -u)
 ```
 
