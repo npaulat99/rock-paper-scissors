@@ -69,7 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve":
         # Set up interactive move prompting for serve mode.
         state.prompt_move_callback = _prompt_for_move
+        state.game_result_callback = _show_game_result
         ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
+        print(f"\n💡 Tip: View live scores at {state.scheme}://{host}:{port}/v1/rps/scores")
+        print(f"   Or run: python3 src/app/cli.py scores\n")
         run_server(host=host, port=port, state=state, ssl_context=ssl_context)
         return 0
 
@@ -216,6 +219,23 @@ def _prompt_for_challenger_move(round_no: int) -> Move:
         if choice in ("s", "scissors"):
             return "scissors"
         print("❌ Invalid choice. Please enter r, p, or s.")
+
+
+def _show_game_result(match_id: str, round_no: int, outcome: str, challenger_move: Move, responder_move: Move, challenger_id: str) -> None:
+    """Display game result for responder."""
+    print(f"\n{'='*60}")
+    print(f"�� Game Result - Round {round_no}")
+    print(f"   Challenger: {challenger_id}")
+    print(f"   Challenger played: {challenger_move}")
+    print(f"   You played: {responder_move}")
+    
+    if outcome == "tie":
+        print(f"   Result: 🤝 TIE")
+    elif outcome == "responder_win":
+        print(f"   Result: 🎉 YOU WIN!")
+    else:
+        print(f"   Result: 😞 You lose")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

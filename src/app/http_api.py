@@ -45,6 +45,9 @@ class ServerState:
     # Callback to prompt for responder move. If None, auto-generates random move.
     # Signature: (match_id: str, round: int, challenger_id: str) -> Move
     prompt_move_callback: Callable[[str, int, str], Move] | None = None
+    # Callback to notify responder of game result after reveal.
+    # Signature: (match_id: str, round: int, outcome: str, challenger_move: Move, responder_move: Move, challenger_id: str) -> None
+    game_result_callback: Callable[[str, int, str, Move, Move, str], None] | None = None
 
 
 def run_server(
@@ -90,6 +93,20 @@ def _make_handler(state: ServerState):
             except json.JSONDecodeError:
                 self._json_error(HTTPStatus.BAD_REQUEST, "invalid_json", "invalid JSON")
             except Exception as exc:  # keep server alive
+                self._json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    f"{type(exc).__name__}: {exc}",
+                )
+
+        def do_GET(self) -> None:  # noqa: N802
+            try:
+                if self.path == "/v1/rps/scores":
+                    self._handle_get_scores()
+                    return
+
+                self._json_error(HTTPStatus.NOT_FOUND, "not_found", "unknown path")
+            except Exception as exc:
                 self._json_error(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     "server_error",
@@ -276,6 +293,17 @@ def _make_handler(state: ServerState):
             elif outcome == "responder_win":
                 state.scoreboard.record_win(existing.challenger_id)
 
+            # Notify responder of game result via callback.
+            if state.game_result_callback is not None:
+                state.game_result_callback(
+                    match_id,
+                    round_no,
+                    outcome,
+                    move,  # type: ignore[arg-type]
+                    existing.responder_move,  # type: ignore[arg-type]
+                    existing.challenger_id,
+                )
+
             self._json_ok(
                 {
                     "match_id": match_id,
@@ -286,6 +314,21 @@ def _make_handler(state: ServerState):
                     "responder_move": existing.responder_move,
                 }
             )
+
+        def _handle_get_scores(self) -> None:
+            """GET /v1/rps/scores - Return current scoreboard as JSON."""
+            scores_data = {
+                "server_spiffe_id": state.server_spiffe_id,
+                "opponents": [],
+            }
+            for peer_id in sorted(state.scoreboard._scores.keys()):
+                score = state.scoreboard._scores[peer_id]
+                scores_data["opponents"].append({
+                    "spiffe_id": peer_id,
+                    "wins": score.wins,
+                    "losses": score.losses,
+                })
+            self._json_ok(scores_data)
 
         # --- Response helpers ---
         def _json_ok(self, payload: dict[str, Any]) -> None:
