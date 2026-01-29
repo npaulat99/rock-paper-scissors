@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     play.add_argument("--spiffe-id", required=True)
     play.add_argument("--peer", required=True, help="Peer base URL, e.g. https://1.2.3.4:9002")
     play.add_argument("--peer-id", required=True, help="Expected peer SPIFFE ID")
-    play.add_argument("--move", required=True, help="rock|paper|scissors")
+    play.add_argument("--move", default=None, help="rock|paper|scissors (if not provided, will prompt)")
     play.add_argument(
         "--public-url",
         default=None,
@@ -67,14 +67,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.cmd == "serve":
+        # Set up interactive move prompting for serve mode.
+        state.prompt_move_callback = _prompt_for_move
         ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
         run_server(host=host, port=port, state=state, ssl_context=ssl_context)
         return 0
 
     if args.cmd == "play":
-        move = args.move.strip().lower()
-        if not is_valid_move(move):
-            raise SystemExit("--move must be rock|paper|scissors")
+        # Prompt for initial move if not provided.
+        if args.move:
+            move = args.move.strip().lower()
+            if not is_valid_move(move):
+                raise SystemExit("--move must be rock|paper|scissors")
+        else:
+            print("🎮 Starting a new match!")
+            move = _prompt_for_challenger_move(1)
 
         # Run the server in the background so the peer can POST /response back.
         ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
@@ -131,21 +138,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Round {round_no}: reveal response:", reveal_resp)
 
-            outcome = reveal_resp.get("outcome")
-            if outcome == "challenger_win":
-                state.scoreboard.record_win(args.peer_id)
-            elif outcome == "responder_win":
-                state.scoreboard.record_loss(args.peer_id)
-
             if reveal_resp.get("outcome") != "tie":
                 break
 
             round_no += 1
-            # On tie, pick a new move automatically to avoid endless ties.
-            import random
-
-            move = random.choice(["rock", "paper", "scissors"])  # type: ignore[assignment]
-            print(f"Tie -> starting round {round_no} with move={move}")
+            # On tie, prompt for new move.
+            print(f"🤝 Tie! Starting round {round_no}...")
+            move = _prompt_for_challenger_move(round_no)
 
         print("Scores:\n" + state.scoreboard.format_table())
 
@@ -189,6 +188,34 @@ def _public_bind_host(host: str) -> str:
     # If binding 0.0.0.0, the challenger_url will not be reachable.
     # Users should replace this with their public IP if needed.
     return "127.0.0.1" if host in ("0.0.0.0", "::") else host
+
+
+def _prompt_for_move(match_id: str, round_no: int, challenger_id: str) -> Move:
+    """Interactive prompt for responder to choose their move."""
+    print(f"\n🎮 Challenge received from {challenger_id}")
+    print(f"   Match: {match_id}, Round: {round_no}")
+    while True:
+        choice = input("Choose your move - (r)ock, (p)aper, (s)cissors: ").strip().lower()
+        if choice in ("r", "rock"):
+            return "rock"
+        if choice in ("p", "paper"):
+            return "paper"
+        if choice in ("s", "scissors"):
+            return "scissors"
+        print("❌ Invalid choice. Please enter r, p, or s.")
+
+
+def _prompt_for_challenger_move(round_no: int) -> Move:
+    """Interactive prompt for challenger to choose their move."""
+    while True:
+        choice = input(f"Round {round_no} - Choose your move - (r)ock, (p)aper, (s)cissors: ").strip().lower()
+        if choice in ("r", "rock"):
+            return "rock"
+        if choice in ("p", "paper"):
+            return "paper"
+        if choice in ("s", "scissors"):
+            return "scissors"
+        print("❌ Invalid choice. Please enter r, p, or s.")
 
 
 if __name__ == "__main__":

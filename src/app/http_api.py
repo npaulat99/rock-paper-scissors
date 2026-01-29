@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import random
 import ssl
+import sys
 import urllib.request
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 
 from commit_reveal import verify_commitment
 from protocol import Move, determine_outcome, is_valid_move
@@ -41,6 +42,9 @@ class ServerState:
     scheme: str = "https"
     default_port: int = 9002
     mtls_files: MtlsFiles | None = None
+    # Callback to prompt for responder move. If None, auto-generates random move.
+    # Signature: (match_id: str, round: int, challenger_id: str) -> Move
+    prompt_move_callback: Callable[[str, int, str], Move] | None = None
 
 
 def run_server(
@@ -145,7 +149,13 @@ def _make_handler(state: ServerState):
             challenger_url = body.get("challenger_url")
             if not isinstance(challenger_url, str) or not challenger_url:
                 challenger_url = self._infer_challenger_base_url()
-            responder_move: Move = random.choice(["rock", "paper", "scissors"])  # type: ignore[assignment]
+            
+            # Prompt for move if callback provided, otherwise auto-generate.
+            if state.prompt_move_callback is not None:
+                responder_move = state.prompt_move_callback(match_id, round_no, challenger_id)
+            else:
+                responder_move: Move = random.choice(["rock", "paper", "scissors"])  # type: ignore[assignment]
+            
             state.store.rounds[key].responder_move = responder_move
 
             try:
