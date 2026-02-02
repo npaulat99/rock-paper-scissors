@@ -405,3 +405,129 @@ EOF
 ```
 
 **Note:** For true local testing with two identities, you need separate processes with different selectors (e.g., different UIDs or container IDs). Simpler approach: use two VMs.
+
+---
+
+## Part 6: Kubernetes Deployment
+
+For production deployments, Kubernetes manifests are provided in `src/k8s/`.
+
+### 6.1 Prerequisites
+
+- Kubernetes cluster with SPIRE deployed
+- SPIRE agent running as DaemonSet with workload attestor
+
+### 6.2 Deploy the Game
+
+```bash
+# Apply all manifests using Kustomize
+kubectl apply -k src/k8s/
+
+# Verify deployment
+kubectl -n rps-game get pods
+kubectl -n rps-game get svc
+
+# Check logs
+kubectl -n rps-game logs -l app=rps-game -c rps-game
+```
+
+### 6.3 Register Kubernetes Workload with SPIRE
+
+```bash
+# Register the workload using Kubernetes selectors
+spire-server entry create \
+  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server \
+  -parentID spiffe://noah.inter-cloud-thi.de/spire/agent/k8s_psat/<cluster-name> \
+  -selector k8s:ns:rps-game \
+  -selector k8s:sa:rps-game
+```
+
+### 6.4 Access the Game
+
+```bash
+# Get NodePort
+kubectl -n rps-game get svc rps-game
+
+# The service is exposed on port 30902
+# Access: https://<node-ip>:30902/v1/rps/scores
+```
+
+---
+
+## Part 7: Move Signing (Optional)
+
+For enhanced security, game moves can be cryptographically signed using Sigstore or SSH keys.
+
+### 7.1 Sigstore (Keyless) Signing
+
+Requires Cosign and OIDC authentication:
+
+```python
+from move_signing import sign_move_sigstore, verify_move_sigstore
+
+# Sign a move
+signed = sign_move_sigstore(
+    move="rock",
+    match_id="abc123",
+    round=1,
+    signer_spiffe_id="spiffe://noah.inter-cloud-thi.de/game-server-alice",
+)
+
+# Verify the move
+is_valid = verify_move_sigstore(signed)
+```
+
+### 7.2 SSH Key Signing (Offline)
+
+For environments without internet access:
+
+```python
+from move_signing import sign_move_ssh, verify_move_ssh
+
+# Sign with SSH key
+signed = sign_move_ssh(
+    move="paper",
+    match_id="abc123",
+    round=1,
+    signer_spiffe_id="spiffe://noah.inter-cloud-thi.de/game-server-alice",
+    ssh_key_path="~/.ssh/id_ed25519",
+)
+
+# Create allowed_signers file with trusted public keys
+# Format: spiffe://domain/identity ssh-ed25519 AAAA...
+is_valid = verify_move_ssh(signed, "~/.config/rps/allowed_signers")
+```
+
+---
+
+## Project Structure
+
+```
+rock-paper-scissors/
+├── .github/workflows/
+│   └── supply-chain.yml     # CI/CD pipeline with signing & attestations
+├── attestations/            # SLSA provenance, SBOM, vulnerability reports
+├── scripts/
+│   ├── download-and-verify-binary.sh  # Download & verify signed binary
+│   └── demo/                           # Demo helper scripts
+├── src/
+│   ├── app/
+│   │   ├── cli.py           # CLI entrypoint (serve, play, scores)
+│   │   ├── commit_reveal.py # SHA256 commitment scheme
+│   │   ├── http_api.py      # HTTP server with mTLS
+│   │   ├── move_signing.py  # Sigstore/SSH move signing
+│   │   ├── protocol.py      # Game rules
+│   │   ├── rps_client.py    # HTTP client for challenges
+│   │   ├── scoreboard.py    # Score tracking per SPIFFE ID
+│   │   └── spiffe_mtls.py   # SPIFFE mTLS SSL contexts
+│   ├── docker/
+│   │   └── Dockerfile       # Container image
+│   └── k8s/                 # Kubernetes manifests
+│       ├── kustomization.yaml
+│       ├── namespace.yaml
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       └── ...
+└── tests/
+    └── test_protocol.py     # Unit tests
+```

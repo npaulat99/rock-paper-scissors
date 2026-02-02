@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rps-game
+  namespace: rps-game
+  labels:
+    app.kubernetes.io/name: rock-paper-scissors
+    app.kubernetes.io/component: game-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rps-game
+  template:
+    metadata:
+      labels:
+        app: rps-game
+        app.kubernetes.io/name: rock-paper-scissors
+    spec:
+      serviceAccountName: rps-game
+      containers:
+        - name: rps-game
+          image: ghcr.io/npaulat99/rock-paper-scissors:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9002
+              name: https
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: rps-config
+          volumeMounts:
+            # SPIRE agent socket for fetching SVIDs
+            - name: spire-agent-socket
+              mountPath: /tmp/spire-agent/public
+              readOnly: true
+            # Certificate storage (populated by spiffe-helper sidecar or init container)
+            - name: certs
+              mountPath: /app/certs
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /v1/rps/scores
+              port: 9002
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/rps/scores
+              port: 9002
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+        # SPIFFE Helper sidecar - fetches and renews X.509 SVIDs
+        - name: spiffe-helper
+          image: ghcr.io/spiffe/spiffe-helper:0.11.0
+          args:
+            - "-config"
+            - "/etc/spiffe-helper/helper.conf"
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /tmp/spire-agent/public
+              readOnly: true
+            - name: certs
+              mountPath: /app/certs
+            - name: spiffe-helper-config
+              mountPath: /etc/spiffe-helper
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+
+      volumes:
+        # Host path to SPIRE agent socket
+        - name: spire-agent-socket
+          hostPath:
+            path: /tmp/spire-agent/public
+            type: DirectoryOrCreate
+        # Shared volume for certificates
+        - name: certs
+          emptyDir: {}
+        # SPIFFE helper configuration
+        - name: spiffe-helper-config
+          configMap:
+            name: spiffe-helper-config

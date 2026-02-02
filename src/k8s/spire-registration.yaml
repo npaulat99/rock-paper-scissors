@@ -1,0 +1,28 @@
+# SPIRE Registration Entry for Kubernetes workload
+# Apply this to the SPIRE server to register the RPS game workload
+#
+# This uses Kubernetes workload attestation selectors:
+# - k8s:ns:rps-game (namespace)
+# - k8s:sa:rps-game (service account)
+#
+# Run with spire-server CLI:
+# spire-server entry create \
+#   -spiffeID spiffe://noah.inter-cloud-thi.de/game-server \
+#   -parentID spiffe://noah.inter-cloud-thi.de/spire/agent/k8s_psat/<cluster-name> \
+#   -selector k8s:ns:rps-game \
+#   -selector k8s:sa:rps-game
+
+# Example ClusterSPIFFEID (if using SPIRE with spiffe-csi-driver):
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: rps-game
+spec:
+  spiffeIDTemplate: "spiffe://{{ .TrustDomain }}/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      app: rps-game
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: rps-game
