@@ -342,26 +342,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+      - name: Build binary in Ubuntu 22.04 container (glibc 2.35 compatibility)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build standalone binary with PyInstaller
-        run: |
-          cd src/app
-          pyinstaller --onefile \
-            --name rps-game \
-            --add-data "../../requirements.txt:." \
-            cli.py
-          ls -lh dist/
-          chmod +x dist/rps-game
+          docker run --rm -v "$PWD:/app" -w /app ubuntu:22.04 bash -c "
+            apt-get update && apt-get install -y python3 python3-pip python3-venv binutils
+            python3 -m pip install --upgrade pip --break-system-packages
+            python3 -m pip install -r requirements.txt pyinstaller --break-system-packages
+            cd src/app
+            python3 -m PyInstaller --onefile --name rps-game --add-data '../../requirements.txt:.' cli.py
+            chmod +x dist/rps-game
+            ls -lh dist/
+          "
 
       - name: Test binary
         run: |
