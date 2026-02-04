@@ -344,7 +344,7 @@ jobs:
 
       - name: Build binary in Ubuntu 22.04 container (glibc 2.35 compatibility)
         run: |
-          docker run --rm -v "$PWD:/app" -w /app ubuntu:22.04 bash -c "
+          docker run --rm -v "$PWD:/app" -w /app ubuntu:22.04 bash -c '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update && apt-get install -y python3 python3-pip python3-venv binutils
             python3 -m venv /tmp/venv
@@ -354,28 +354,25 @@ jobs:
             cd src/app
             
             # Create a simple wrapper that imports everything needed
-            cat > rps_bundle.py << 'PYEOF'
-# Bundle all modules for PyInstaller
-import http_api
-import protocol
-import game
-import commit_reveal
-import rps_client
-import scoreboard
-import spiffe_mtls
-import move_signing
-import main
-import cli
-
-if __name__ == '__main__':
-    cli.main()
-PYEOF
+            echo "import http_api" > rps_bundle.py
+            echo "import protocol" >> rps_bundle.py
+            echo "import game" >> rps_bundle.py
+            echo "import commit_reveal" >> rps_bundle.py
+            echo "import rps_client" >> rps_bundle.py
+            echo "import scoreboard" >> rps_bundle.py
+            echo "import spiffe_mtls" >> rps_bundle.py
+            echo "import move_signing" >> rps_bundle.py
+            echo "import main" >> rps_bundle.py
+            echo "import cli" >> rps_bundle.py
+            echo "" >> rps_bundle.py
+            echo "if __name__ == \"__main__\":" >> rps_bundle.py
+            echo "    cli.main()" >> rps_bundle.py
             
             # Build with the bundle that explicitly imports all modules
             pyinstaller --onefile --name rps-game rps_bundle.py
             chmod +x dist/rps-game
             ls -lh dist/
-          "
+          '
           # Fix ownership - Docker runs as root, but runner needs write access
           sudo chown -R $(id -u):$(id -g) src/app/dist/
 
