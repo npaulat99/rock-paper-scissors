@@ -182,12 +182,26 @@ EOF
 ### 1.4 Start SPIRE Server
 
 ```bash
-# Start server
 cd ~/spire-1.13.3
-sudo ./bin/spire-server run -config /opt/spire/server/server.conf &
+
+# Kill any existing SPIRE processes first (cleanup from previous runs)
+sudo pkill -f spire-server || true
+sudo pkill -f spire-agent || true
+sleep 2
+
+# Clean up stale socket files
+sudo rm -f /tmp/spire-server/private/api.sock
+sudo rm -f /tmp/spire-agent/public/api.sock
+
+# Create data directories
+sudo mkdir -p /tmp/spire-server/data
+sudo mkdir -p /tmp/spire-agent/data /tmp/spire-agent/public
+
+# Start server (nohup to prevent terminal output mixing)
+sudo nohup ./bin/spire-server run -config /opt/spire/server/server.conf > /tmp/spire-server.log 2>&1 &
 
 # Wait for server to start
-sleep 3
+sleep 5
 
 # Verify server is running
 sudo ./bin/spire-server healthcheck
@@ -196,14 +210,18 @@ sudo ./bin/spire-server healthcheck
 ### 1.5 Generate Join Token and Start Agent
 
 ```bash
+cd ~/spire-1.13.3
+
 # Generate join token for agent
 TOKEN=$(sudo ./bin/spire-server token generate -spiffeID spiffe://noah.inter-cloud-thi.de/agent/myagent | grep Token | awk '{print $2}')
 
-# Start agent with join token
-sudo ./bin/spire-agent run -config /opt/spire/agent/agent.conf -joinToken $TOKEN &
+echo "Token: $TOKEN"
+
+# Start agent with join token (nohup to prevent terminal output mixing)
+sudo nohup ./bin/spire-agent run -config /opt/spire/agent/agent.conf -joinToken $TOKEN > /tmp/spire-agent.log 2>&1 &
 
 # Wait for agent to start
-sleep 3
+sleep 5
 
 # Verify socket exists
 ls -la /tmp/spire-agent/public/api.sock
@@ -560,4 +578,39 @@ rock-paper-scissors/
 │       └── ...
 └── tests/
     └── test_protocol.py     # Unit tests
+```
+
+---
+
+## Part 8: Cleanup (After Demo)
+
+Run these commands to stop all SPIRE processes and clean up:
+
+```bash
+# Stop all SPIRE processes
+sudo pkill -f spire-server
+sudo pkill -f spire-agent
+
+# Stop any running game containers
+docker stop $(docker ps -q --filter ancestor=ghcr.io/npaulat99/rock-paper-scissors:latest) 2>/dev/null || true
+
+# Clean up socket files and data
+sudo rm -rf /tmp/spire-server
+sudo rm -rf /tmp/spire-agent
+sudo rm -f /tmp/bootstrap-bundle.crt
+
+# Clean up logs
+sudo rm -f /tmp/spire-server.log /tmp/spire-agent.log
+
+# Verify everything is stopped
+ps aux | grep -E "(spire|rps)" | grep -v grep
+```
+
+**To view logs if something goes wrong:**
+```bash
+# Server logs
+sudo tail -f /tmp/spire-server.log
+
+# Agent logs  
+sudo tail -f /tmp/spire-agent.log
 ```
