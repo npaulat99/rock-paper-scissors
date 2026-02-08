@@ -3,13 +3,13 @@ services:
     build:
       context: .
       dockerfile: src/docker/Dockerfile
-    ports:
-      - "9002:9002"
+    network_mode: host
+    stdin_open: true
+    tty: true
     environment:
-      RPS_MODE: "serve"
       RPS_BIND: "0.0.0.0:9002"
       RPS_MTLS: "1"
-      RPS_SPIFFE_ID: "spiffe://noah.inter-cloud-thi.de/game-server"
+      RPS_SPIFFE_ID: "spiffe://noah.inter-cloud-thi.de/game-server-noah"
       RPS_CERT_DIR: "/app/certs"
     volumes:
-      - ./certs:/app/certs
+      - ./certs:/app/certs:ro

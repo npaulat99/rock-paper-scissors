@@ -7,7 +7,7 @@
 #
 # Run with spire-server CLI:
 # spire-server entry create \
-#   -spiffeID spiffe://noah.inter-cloud-thi.de/game-server \
+#   -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-noah \
 #   -parentID spiffe://noah.inter-cloud-thi.de/spire/agent/k8s_psat/<cluster-name> \
 #   -selector k8s:ns:rps-game \
 #   -selector k8s:sa:rps-game

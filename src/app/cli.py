@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 
+from acme_scoreboard import start_acme_scoreboard
 from http_api import ServerState, run_server
 from protocol import Move, is_valid_move
 from rps_client import send_challenge, send_reveal
@@ -13,163 +14,261 @@ from scoreboard import ScoreBoard
 from spiffe_mtls import MtlsFiles, create_server_ssl_context, mtls_files_from_cert_dir
 
 
+# ---------------------------------------------------------------------------
+# Interactive command loop — runs in the main thread while the HTTP server
+# runs in a background daemon thread.  The player can issue challenges,
+# view scores, or quit at any time.  Incoming challenges are handled
+# automatically by the server thread (prompting for moves via callback).
+# ---------------------------------------------------------------------------
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="rps")
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    serve = sub.add_parser("serve", help="Run the HTTP server (mTLS later; HTTP for now)")
-    serve.add_argument("--bind", default="0.0.0.0:9002")
-    serve.add_argument("--spiffe-id", required=True)
-    serve.add_argument("--mtls", action="store_true", help="Enable SPIFFE mTLS using files from --cert-dir")
-    serve.add_argument("--cert-dir", default=None, help="Directory containing svid.pem, svid_key.pem, svid_bundle.pem")
-    serve.add_argument("--scores", default=_default_scores_path())
-
-    play = sub.add_parser("play", help="Start server and challenge a peer")
-    play.add_argument("--bind", default="0.0.0.0:9002")
-    play.add_argument("--spiffe-id", required=True)
-    play.add_argument("--peer", required=True, help="Peer base URL, e.g. https://1.2.3.4:9002")
-    play.add_argument("--peer-id", required=True, help="Expected peer SPIFFE ID")
-    play.add_argument("--move", default=None, help="rock|paper|scissors (if not provided, will prompt)")
-    play.add_argument(
+    parser = argparse.ArgumentParser(
+        prog="rps",
+        description="Interactive Rock-Paper-Scissors with SPIFFE mTLS",
+    )
+    parser.add_argument("--bind", default="0.0.0.0:9002", help="host:port to listen on")
+    parser.add_argument("--spiffe-id", required=True, help="Your SPIFFE ID")
+    parser.add_argument("--mtls", action="store_true", help="Enable SPIFFE mTLS")
+    parser.add_argument("--cert-dir", default=None, help="Directory with svid.pem, svid_key.pem, svid_bundle.pem")
+    parser.add_argument("--scores", default=_default_scores_path(), help="Path to scores JSON file")
+    parser.add_argument(
         "--public-url",
         default=None,
-        help="Your public base URL reachable by peers, e.g. http://<your-public-ip>:9002",
+        help="Your public URL reachable by peers, e.g. https://<ip>:9002",
     )
-    play.add_argument("--mtls", action="store_true", help="Enable SPIFFE mTLS using files from --cert-dir")
-    play.add_argument("--cert-dir", default=None, help="Directory containing svid.pem, svid_key.pem, svid_bundle.pem")
-    play.add_argument("--scores", default=_default_scores_path())
-
-    scores = sub.add_parser("scores", help="Print local scores")
-    scores.add_argument("--scores", default=_default_scores_path())
+    parser.add_argument(
+        "--acme-cert",
+        default=None,
+        help="Path to Let's Encrypt fullchain.pem for public HTTPS scoreboard",
+    )
+    parser.add_argument(
+        "--acme-key",
+        default=None,
+        help="Path to Let's Encrypt privkey.pem for public HTTPS scoreboard",
+    )
+    parser.add_argument(
+        "--acme-bind",
+        default="0.0.0.0:443",
+        help="Bind address for the ACME/WebPKI scoreboard (default: 0.0.0.0:443)",
+    )
 
     args = parser.parse_args(argv)
-
-    if args.cmd == "scores":
-        sb = ScoreBoard.load(args.scores)
-        print(sb.format_table())
-        return 0
 
     host, port = _parse_bind(args.bind)
     sb = ScoreBoard.load(args.scores)
 
     mtls_files: MtlsFiles | None = None
-    if getattr(args, "mtls", False):
-        if not getattr(args, "cert_dir", None):
+    if args.mtls:
+        if not args.cert_dir:
             raise SystemExit("--mtls requires --cert-dir")
         mtls_files = mtls_files_from_cert_dir(args.cert_dir)
+
+    scheme = "https" if mtls_files is not None else "http"
 
     state = ServerState(
         scoreboard=sb,
         server_spiffe_id=args.spiffe_id,
-        scheme="http",
+        scheme=scheme,
         default_port=port,
         mtls_files=mtls_files,
+        prompt_move_callback=_prompt_for_move,
+        game_result_callback=_show_game_result,
     )
 
-    if args.cmd == "serve":
-        # Set up interactive move prompting for serve mode.
-        state.prompt_move_callback = _prompt_for_move
-        state.game_result_callback = _show_game_result
-        ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
-        print(f"\n💡 Tip: View live scores at {state.scheme}://{host}:{port}/v1/rps/scores")
-        print(f"   Or run: python3 src/app/cli.py scores\n")
-        run_server(host=host, port=port, state=state, ssl_context=ssl_context)
-        return 0
+    # Start HTTP(S) server in background
+    ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
+    t = threading.Thread(
+        target=run_server,
+        kwargs={"host": host, "port": port, "state": state, "ssl_context": ssl_context},
+        daemon=True,
+    )
+    t.start()
+    time.sleep(0.5)
 
-    if args.cmd == "play":
-        # Prompt for initial move if not provided.
-        if args.move:
-            move = args.move.strip().lower()
-            if not is_valid_move(move):
-                raise SystemExit("--move must be rock|paper|scissors")
-        else:
-            print("🎮 Starting a new match!")
-            move = _prompt_for_challenger_move(1)
-
-        # Run the server in the background so the peer can POST /response back.
-        ssl_context = create_server_ssl_context(mtls_files) if mtls_files is not None else None
-        
-        # Compute scheme before starting server
-        scheme = "https" if mtls_files is not None else "http"
-        
-        t = threading.Thread(
-            target=run_server,
-            kwargs={"host": host, "port": port, "state": state, "ssl_context": ssl_context},
-            daemon=True,
+    # Start ACME/WebPKI public scoreboard if certs are provided
+    acme_info = ""
+    if args.acme_cert and args.acme_key:
+        acme_host, acme_port = _parse_bind(args.acme_bind)
+        start_acme_scoreboard(
+            host=acme_host,
+            port=acme_port,
+            scoreboard=sb,
+            server_spiffe_id=args.spiffe_id,
+            cert_path=args.acme_cert,
+            key_path=args.acme_key,
         )
-        t.start()
-        # Give the server time to bind and start listening before sending the challenge.
-        time.sleep(1)
-        print(f"Listening on {scheme}://{host}:{port}")
+        acme_info = f"\n  ACME Score : https://{acme_host}:{acme_port}/v1/rps/scores  (WebPKI)"
 
-        match_id = str(uuid.uuid4())
+    challenger_url = args.public_url or f"{scheme}://{_public_bind_host(host)}:{port}"
 
-        # For cross-VM play, peers need a reachable callback URL for message 2.
-        # If you don't pass --public-url, we can only work on localhost demos.
-        challenger_url = args.public_url or f"{scheme}://{_public_bind_host(host)}:{port}"
+    print()
+    print("=" * 60)
+    print("  Rock-Paper-Scissors — Interactive Mode")
+    print(f"  SPIFFE ID : {args.spiffe_id}")
+    print(f"  Listening : {scheme}://{host}:{port}")
+    print(f"  Public URL: {challenger_url}")
+    print(f"  Scoreboard: {scheme}://{host}:{port}/v1/rps/scores")
+    if acme_info:
+        print(acme_info)
+    print("=" * 60)
+    print()
+    print("Commands:")
+    print("  challenge <peer_url> <peer_spiffe_id>  — Start a match")
+    print("  scores                                 — Show scoreboard")
+    print("  help                                   — Show commands")
+    print("  quit / exit                            — Exit")
+    print()
 
-        round_no = 1
-        while True:
-            # Create local match state so /response can validate identities.
-            state.store.rounds[(match_id, round_no)] = __make_local_challenge_state(
-                challenger_id=args.spiffe_id,
-                responder_id=args.peer_id,
-                commitment="",
+    # Interactive command loop
+    while True:
+        try:
+            line = input("rps> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            return 0
+
+        if not line:
+            continue
+
+        parts = line.split()
+        cmd = parts[0].lower()
+
+        if cmd in ("quit", "exit", "q"):
+            print("Goodbye!")
+            return 0
+
+        if cmd in ("scores", "score", "s"):
+            print(state.scoreboard.format_table())
+            continue
+
+        if cmd in ("help", "h", "?"):
+            print("Commands:")
+            print("  challenge <peer_url> <peer_spiffe_id>  — Start a match")
+            print("  scores                                 — Show scoreboard")
+            print("  quit / exit                            — Exit")
+            continue
+
+        if cmd in ("challenge", "c", "play"):
+            if len(parts) < 3:
+                print("Usage: challenge <peer_url> <peer_spiffe_id>")
+                print("  Example: challenge https://10.0.0.5:9002 spiffe://raghad.inter-cloud-thi.de/game-server-raghad")
+                continue
+            peer_url = parts[1]
+            peer_id = parts[2]
+
+            # Run the challenge in a thread so the server keeps handling requests
+            challenge_thread = threading.Thread(
+                target=_run_challenge,
+                args=(state, peer_url, peer_id, args.spiffe_id, challenger_url, mtls_files),
+                daemon=True,
             )
+            challenge_thread.start()
+            continue
 
-            # Message 1.
+        print(f"Unknown command: {cmd}. Type 'help' for available commands.")
+
+
+def _run_challenge(
+    state: ServerState,
+    peer_url: str,
+    peer_id: str,
+    my_spiffe_id: str,
+    challenger_url: str,
+    mtls_files: MtlsFiles | None,
+) -> None:
+    """Run a full challenge sequence in a background thread."""
+    match_id = str(uuid.uuid4())
+    round_no = 1
+
+    move = _prompt_for_challenger_move(round_no)
+
+    while True:
+        from http_api import MatchRoundState
+        state.store.rounds[(match_id, round_no)] = MatchRoundState(
+            challenger_id=my_spiffe_id,
+            responder_id=peer_id,
+            commitment="",
+        )
+
+        try:
             result = send_challenge(
-                peer_base_url=args.peer,
+                peer_base_url=peer_url,
                 match_id=match_id,
                 round=round_no,
-                challenger_spiffe_id=args.spiffe_id,
-                responder_spiffe_id=args.peer_id,
+                challenger_spiffe_id=my_spiffe_id,
+                responder_spiffe_id=peer_id,
                 move=move,  # type: ignore[arg-type]
                 challenger_url=challenger_url,
                 mtls_files=mtls_files,
             )
-            state.store.rounds[(match_id, round_no)].commitment = result["commitment"]
-            salt = result["salt"]
-            print(f"Round {round_no}: challenge sent")
+        except Exception as exc:
+            print(f"\n❌ Challenge failed: {exc}")
+            print("rps> ", end="", flush=True)
+            return
 
-            # Wait for message 2 to arrive.
-            _wait_for(lambda: state.store.rounds[(match_id, round_no)].responder_move is not None, timeout_seconds=30)
+        state.store.rounds[(match_id, round_no)].commitment = result["commitment"]
+        salt = result["salt"]
+        print(f"Round {round_no}: challenge sent, waiting for response...")
 
-            # Message 3.
+        try:
+            _wait_for(
+                lambda: state.store.rounds[(match_id, round_no)].responder_move is not None,
+                timeout_seconds=60,
+            )
+        except TimeoutError:
+            print("\n⏰ Timed out waiting for peer response.")
+            print("rps> ", end="", flush=True)
+            return
+
+        try:
             reveal_resp = send_reveal(
-                peer_base_url=args.peer,
+                peer_base_url=peer_url,
                 match_id=match_id,
                 round=round_no,
                 move=move,  # type: ignore[arg-type]
                 salt=salt,
-                challenger_spiffe_id=args.spiffe_id,
+                challenger_spiffe_id=my_spiffe_id,
                 mtls_files=mtls_files,
             )
-            print(f"Round {round_no}: reveal response:", reveal_resp)
+        except Exception as exc:
+            print(f"\n❌ Reveal failed: {exc}")
+            print("rps> ", end="", flush=True)
+            return
 
-            if reveal_resp.get("outcome") != "tie":
-                break
+        outcome = reveal_resp.get("outcome", "unknown")
+        challenger_move = reveal_resp.get("challenger_move", move)
+        responder_move = reveal_resp.get("responder_move", "?")
 
-            round_no += 1
-            # On tie, prompt for new move.
-            print(f"🤝 Tie! Starting round {round_no}...")
-            move = _prompt_for_challenger_move(round_no)
+        print()
+        print("=" * 60)
+        print(f"  Game Result — Round {round_no}")
+        print(f"  Opponent : {peer_id}")
+        print(f"  You played: {challenger_move}")
+        print(f"  Opponent played: {responder_move}")
+        if outcome == "tie":
+            print("  Result: 🤝 TIE — replaying...")
+        elif outcome == "challenger_win":
+            print("  Result: 🎉 YOU WIN!")
+            state.scoreboard.record_win(peer_id)
+        else:
+            print("  Result: 😞 You lose")
+            state.scoreboard.record_loss(peer_id)
+        print("=" * 60)
 
-        print("Scores:\n" + state.scoreboard.format_table())
+        if outcome != "tie":
+            break
 
-        # Keep serving so you can be challenged back.
-        print("Server still running. Ctrl+C to exit.")
-        while True:
-            time.sleep(3600)
+        round_no += 1
+        move = _prompt_for_challenger_move(round_no)
 
-    raise SystemExit("unhandled command")
+    print()
+    print("rps> ", end="", flush=True)
 
 
-def __make_local_challenge_state(*, challenger_id: str, responder_id: str, commitment: str):
-    # Local helper to avoid importing dataclass directly from http_api in CLI.
-    from http_api import MatchRoundState
-
-    return MatchRoundState(challenger_id=challenger_id, responder_id=responder_id, commitment=commitment)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _wait_for(predicate, timeout_seconds: int) -> None:
@@ -194,54 +293,61 @@ def _default_scores_path() -> str:
 
 
 def _public_bind_host(host: str) -> str:
-    # If binding 0.0.0.0, the challenger_url will not be reachable.
-    # Users should replace this with their public IP if needed.
     return "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
 
 def _prompt_for_move(match_id: str, round_no: int, challenger_id: str) -> Move:
-    """Interactive prompt for responder to choose their move."""
-    print(f"\n🎮 Challenge received from {challenger_id}")
-    print(f"   Match: {match_id}, Round: {round_no}")
+    """Interactive prompt for responder to choose their move (incoming challenge)."""
+    print(f"\n🎮 Incoming challenge from {challenger_id}")
+    print(f"   Match: {match_id[:8]}..., Round: {round_no}")
     while True:
-        choice = input("Choose your move - (r)ock, (p)aper, (s)cissors: ").strip().lower()
+        choice = input("Your move — (r)ock, (p)aper, (s)cissors: ").strip().lower()
         if choice in ("r", "rock"):
             return "rock"
         if choice in ("p", "paper"):
             return "paper"
         if choice in ("s", "scissors"):
             return "scissors"
-        print("❌ Invalid choice. Please enter r, p, or s.")
+        print("❌ Invalid. Enter r, p, or s.")
 
 
 def _prompt_for_challenger_move(round_no: int) -> Move:
     """Interactive prompt for challenger to choose their move."""
     while True:
-        choice = input(f"Round {round_no} - Choose your move - (r)ock, (p)aper, (s)cissors: ").strip().lower()
+        choice = input(f"Round {round_no} — choose (r)ock, (p)aper, (s)cissors: ").strip().lower()
         if choice in ("r", "rock"):
             return "rock"
         if choice in ("p", "paper"):
             return "paper"
         if choice in ("s", "scissors"):
             return "scissors"
-        print("❌ Invalid choice. Please enter r, p, or s.")
+        print("❌ Invalid. Enter r, p, or s.")
 
 
-def _show_game_result(match_id: str, round_no: int, outcome: str, challenger_move: Move, responder_move: Move, challenger_id: str) -> None:
-    """Display game result for responder."""
-    print(f"\n{'='*60}")
-    print(f"�� Game Result - Round {round_no}")
-    print(f"   Challenger: {challenger_id}")
-    print(f"   Challenger played: {challenger_move}")
-    print(f"   You played: {responder_move}")
-    
+def _show_game_result(
+    match_id: str,
+    round_no: int,
+    outcome: str,
+    challenger_move: Move,
+    responder_move: Move,
+    challenger_id: str,
+) -> None:
+    """Display game result for responder (incoming challenge result)."""
+    print()
+    print("=" * 60)
+    print(f"  Game Result — Round {round_no}")
+    print(f"  Challenger : {challenger_id}")
+    print(f"  Challenger played: {challenger_move}")
+    print(f"  You played: {responder_move}")
     if outcome == "tie":
-        print(f"   Result: 🤝 TIE")
+        print("  Result: 🤝 TIE")
     elif outcome == "responder_win":
-        print(f"   Result: 🎉 YOU WIN!")
+        print("  Result: 🎉 YOU WIN!")
     else:
-        print(f"   Result: 😞 You lose")
-    print(f"{'='*60}\n")
+        print("  Result: 😞 You lose")
+    print("=" * 60)
+    print()
+    print("rps> ", end="", flush=True)
 
 
 if __name__ == "__main__":

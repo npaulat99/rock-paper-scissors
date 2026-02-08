@@ -12,7 +12,7 @@ load_spire_env
 SPIRE_SERVER_BIN="${SPIRE_SERVER_BIN:-/opt/spire/bin/spire-server}"
 SERVER_SOCKET="${SERVER_SOCKET:-/tmp/spire-server/private/api.sock}"
 
-SPIFFE_ID="${SPIFFE_ID:-spiffe://$TRUST_DOMAIN/game-server}"
+SPIFFE_ID="${SPIFFE_ID:-spiffe://$TRUST_DOMAIN/game-server-noah}"
 PARENT_ID="${PARENT_ID:-spiffe://$TRUST_DOMAIN/agent}"
 SELECTOR_UID="${SELECTOR_UID:-$(id -u)}"
 if [[ -z "${SELECTOR_PATH:-}" ]]; then

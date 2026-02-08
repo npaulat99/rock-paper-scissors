@@ -9,9 +9,8 @@ data:
   # SPIFFE Trust Domain for this deployment
   TRUST_DOMAIN: "noah.inter-cloud-thi.de"
   # Workload identity path
-  SPIFFE_ID: "spiffe://noah.inter-cloud-thi.de/game-server"
+  RPS_SPIFFE_ID: "spiffe://noah.inter-cloud-thi.de/game-server-noah"
   # Server binding
   RPS_BIND: "0.0.0.0:9002"
-  RPS_MODE: "serve"
   RPS_MTLS: "1"
   RPS_CERT_DIR: "/app/certs"

@@ -19,7 +19,6 @@ COPY scripts/container/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 ENV RPS_BIND=0.0.0.0:9002
-ENV RPS_MODE=serve
 ENV RPS_MTLS=1
 ENV RPS_CERT_DIR=/app/certs
 
