@@ -190,11 +190,60 @@ sleep 5
 ls -la /tmp/spire-agent/public/api.sock
 ```
 
-## 6. Register Workload with Federation
+## 6. Export Your Trust Bundle & Import Raghad's Trust Bundle
+
+> **IMPORTANT:** The peer's trust bundle must be imported **before** you can
+> register a workload entry with `-federatesWith`. Otherwise SPIRE will
+> reject the entry with *"unable to find federated bundle"*.
+
+First, export your own bundle to share with Raghad:
 
 ```bash
 cd ~/spire-1.13.3
 
+# Export your trust bundle in SPIFFE format — send this to Raghad
+sudo ./bin/spire-server bundle show -format spiffe
+```
+
+Copy the JSON output and send it to Raghad. Then import Raghad's trust
+bundle by pasting the JSON she sends you:
+
+```bash
+cd ~/spire-1.13.3
+
+cat <<'BUNDLE_EOF' | sudo ./bin/spire-server bundle set -format spiffe -id spiffe://raghad.inter-cloud-thi.de
+<PASTE RAGHAD'S FULL JSON BUNDLE HERE>
+BUNDLE_EOF
+
+# Verify both bundles are listed
+sudo ./bin/spire-server bundle list
+# Should list: noah.inter-cloud-thi.de AND raghad.inter-cloud-thi.de
+```
+
+> **To get a fresh bundle from Raghad:** she runs
+> `sudo ./bin/spire-server bundle show -format spiffe` and sends the output.
+
+## 7. Register Workload with Federation
+
+Now that Raghad's bundle is imported, you can create the workload entry
+with `-federatesWith`.
+
+First, clean up any stale entries from previous runs:
+
+```bash
+cd ~/spire-1.13.3
+
+# Show all entries and delete any stale ones
+sudo ./bin/spire-server entry show
+
+# Delete each old entry (replace with actual IDs shown above)
+# sudo ./bin/spire-server entry delete -entryID <ENTRY_ID>
+# Repeat for every entry listed
+```
+
+Then create the workload entry:
+
+```bash
 sudo ./bin/spire-server entry create \
   -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-noah \
   -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
@@ -205,53 +254,15 @@ sudo ./bin/spire-server entry create \
 sudo ./bin/spire-server entry show
 ```
 
-**If it says "AlreadyExists":** delete the old entry first:
-```bash
-# Find the entry ID
-sudo ./bin/spire-server entry show
-# Delete it (replace with actual ID)
-sudo ./bin/spire-server entry delete -entryID <ENTRY_ID>
-# Then re-run the create command above
-```
-
-## 7. Import Raghad's Trust Bundle
-
-Import Raghad's trust bundle by pasting the JSON directly:
-
-```bash
-cd ~/spire-1.13.3
-
-cat <<'BUNDLE_EOF' | sudo ./bin/spire-server bundle set -format spiffe -id spiffe://raghad.inter-cloud-thi.de
-{
-    "keys": [
-        {
-            "use": "x509-svid",
-            "kty": "EC",
-            "crv": "P-256",
-            "x": "<raghad-x-value>",
-            "y": "<raghad-y-value>",
-            "x5c": ["<raghad-x5c-cert>"]
-        }
-    ],
-    "spiffe_sequence": 1
-}
-BUNDLE_EOF
-
-# Verify both bundles are listed
-sudo ./bin/spire-server bundle list
-```
-
-> **Note:** Replace the placeholder values with Raghad's actual trust bundle.
-> To get a fresh bundle from Raghad: she runs `sudo ./bin/spire-server bundle show -format spiffe`
-
 ## 8. Fetch Certificates (with Combined Bundle)
 
-This is the critical step — after importing Raghad's bundle AND registering with `-federatesWith`, the agent will issue certs with **both** CAs in the federated bundle.
+After importing Raghad's bundle AND registering with `-federatesWith`,
+restart the agent so it picks up the new entry, then fetch certs.
 
 ```bash
 cd ~/spire-1.13.3
 
-# If agent hasn't synced (gives "no identity issued"), restart it:
+# Restart agent with a fresh join token
 sudo pkill -f spire-agent
 sleep 3
 sudo rm -rf /tmp/spire-agent/data/*
@@ -264,19 +275,24 @@ sudo nohup ./bin/spire-agent run \
   -joinToken $TOKEN > /tmp/spire-agent.log 2>&1 &
 sleep 30
 
-# Verify agent picked up the entry
+# Verify agent picked up the entry — look for "Creating X509-SVID" for game-server-noah
 sudo tail -20 /tmp/spire-agent.log
-# Should show: "Creating X509-SVID" for game-server-noah
 
 # Fetch certs
 mkdir -p ~/certs
-rm -f ~/certs/*.pem
+rm -f ~/certs/*
 SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
   ~/spire-1.13.3/bin/spire-agent api fetch x509 -write ~/certs/
 
-# Verify federated bundle was fetched
+# Verify the fetch succeeded — you must see these 4 files:
 ls ~/certs/
-# Should show: svid.0.pem, svid.0.key, bundle.0.pem, federated_bundle.0.0.pem
+# Expected: svid.0.pem  svid.0.key  bundle.0.pem  federated_bundle.0.0.pem
+#
+# If you see "no identity issued" or files are missing:
+#   1. Check entry exists: sudo ./bin/spire-server entry show
+#   2. Entry must have SPIFFE ID game-server-noah (not agent/myagent)
+#   3. Entry selector must be unix:uid:$(id -u)
+#   4. Restart agent again with a new token (repeat above)
 
 # IMPORTANT: Combine both CAs into one bundle file
 cat ~/certs/bundle.0.pem ~/certs/federated_bundle.0.0.pem > ~/certs/svid_bundle.pem
@@ -290,6 +306,20 @@ grep -c "BEGIN CERTIFICATE" ~/certs/svid_bundle.pem
 
 ## 9. Run the Game
 
+### Option A: Using the signed binary
+
+```bash
+cd ~/temp
+./rps-game \
+  --bind 0.0.0.0:9002 \
+  --spiffe-id spiffe://noah.inter-cloud-thi.de/game-server-noah \
+  --public-url https://4.185.66.130:9002 \
+  --mtls \
+  --cert-dir ~/certs
+```
+
+### Option B: Using Docker
+
 ```bash
 docker run -it --rm \
   --network host \
@@ -302,7 +332,8 @@ docker run -it --rm \
 ```
 
 You'll see an interactive prompt:
-```
+
+```text
 ============================================================
   Rock-Paper-Scissors — Interactive Mode
   SPIFFE ID : spiffe://noah.inter-cloud-thi.de/game-server-noah
@@ -320,13 +351,15 @@ rps>
 
 ### Challenge Raghad
 
-```
+```text
 rps> challenge https://4.185.211.9:9002 spiffe://raghad.inter-cloud-thi.de/game-server-raghad
+Round 1 — choose (r)ock, (p)aper, (s)cissors: s
+Round 1: challenge sent, waiting for response...
 ```
 
 ### View Scores
 
-```
+```text
 rps> scores
 ```
 
@@ -448,52 +481,79 @@ sleep 5
 ls -la /tmp/spire-agent/public/api.sock
 ```
 
-## 6. Register Workload with Federation
+## 6. Export Your Trust Bundle & Import Noah's Trust Bundle
+
+> **IMPORTANT:** The peer's trust bundle must be imported **before** you can
+> register a workload entry with `-federatesWith`. Otherwise SPIRE will
+> reject the entry with *"unable to find federated bundle"*.
+
+First, export your own bundle to share with Noah:
 
 ```bash
 cd ~/spire-1.13.3
 
+# Export your trust bundle in SPIFFE format — send this to Noah
+sudo ./bin/spire-server bundle show -format spiffe
+```
+
+Copy the JSON output and send it to Noah. Then import Noah's trust
+bundle by pasting the JSON he sends you:
+
+```bash
+cd ~/spire-1.13.3
+
+cat <<'BUNDLE_EOF' | sudo ./bin/spire-server bundle set -format spiffe -id spiffe://noah.inter-cloud-thi.de
+<PASTE NOAH'S FULL JSON BUNDLE HERE>
+BUNDLE_EOF
+
+# Verify both bundles are listed
+sudo ./bin/spire-server bundle list
+# Should list: raghad.inter-cloud-thi.de AND noah.inter-cloud-thi.de
+```
+
+> **To get a fresh bundle from Noah:** he runs
+> `sudo ./bin/spire-server bundle show -format spiffe` and sends the output.
+
+## 7. Register Workload with Federation
+
+Now that Noah's bundle is imported, you can create the workload entry
+with `-federatesWith`.
+
+First, clean up any stale entries from previous runs:
+
+```bash
+cd ~/spire-1.13.3
+
+# Show all entries and delete any stale ones
+sudo ./bin/spire-server entry show
+
+# Delete each old entry (replace with actual IDs shown above)
+# sudo ./bin/spire-server entry delete -entryID <ENTRY_ID>
+# Repeat for every entry listed
+```
+
+Then create the workload entry:
+
+```bash
 sudo ./bin/spire-server entry create \
   -spiffeID spiffe://raghad.inter-cloud-thi.de/game-server-raghad \
   -parentID spiffe://raghad.inter-cloud-thi.de/agent/myagent \
   -selector unix:uid:$(id -u) \
   -federatesWith spiffe://noah.inter-cloud-thi.de
 
+# Verify — should show FederatesWith: noah.inter-cloud-thi.de
 sudo ./bin/spire-server entry show
-```
-
-## 7. Import Noah's Trust Bundle
-
-```bash
-cd ~/spire-1.13.3
-
-# Get Noah's bundle: he runs: sudo ./bin/spire-server bundle show -format spiffe
-# Then paste it here:
-cat <<'BUNDLE_EOF' | sudo ./bin/spire-server bundle set -format spiffe -id spiffe://noah.inter-cloud-thi.de
-{
-    "keys": [
-        {
-            "use": "x509-svid",
-            "kty": "EC",
-            "crv": "P-256",
-            "x": "<noah-x-value>",
-            "y": "<noah-y-value>",
-            "x5c": ["<noah-x5c-cert>"]
-        }
-    ],
-    "spiffe_sequence": 1
-}
-BUNDLE_EOF
-
-sudo ./bin/spire-server bundle list
 ```
 
 ## 8. Fetch Certificates (with Combined Bundle)
 
+After importing Noah's bundle AND registering with `-federatesWith`,
+restart the agent so it picks up the new entry, then fetch certs.
+
 ```bash
 cd ~/spire-1.13.3
 
-# Restart agent to pick up federation
+# Restart agent with a fresh join token
 sudo pkill -f spire-agent
 sleep 3
 sudo rm -rf /tmp/spire-agent/data/*
@@ -506,13 +566,24 @@ sudo nohup ./bin/spire-agent run \
   -joinToken $TOKEN > /tmp/spire-agent.log 2>&1 &
 sleep 30
 
+# Verify agent picked up the entry — look for "Creating X509-SVID" for game-server-raghad
 sudo tail -20 /tmp/spire-agent.log
-# Should show: "Creating X509-SVID" for game-server-raghad
 
+# Fetch certs
 mkdir -p ~/certs
-rm -f ~/certs/*.pem
+rm -f ~/certs/*
 SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
   ~/spire-1.13.3/bin/spire-agent api fetch x509 -write ~/certs/
+
+# Verify the fetch succeeded — you must see these 4 files:
+ls ~/certs/
+# Expected: svid.0.pem  svid.0.key  bundle.0.pem  federated_bundle.0.0.pem
+#
+# If you see "no identity issued" or files are missing:
+#   1. Check entry exists: sudo ./bin/spire-server entry show
+#   2. Entry must have SPIFFE ID game-server-raghad (not agent/myagent)
+#   3. Entry selector must be unix:uid:$(id -u)
+#   4. Restart agent again with a new token (repeat above)
 
 # IMPORTANT: Combine both CAs into one bundle file
 cat ~/certs/bundle.0.pem ~/certs/federated_bundle.0.0.pem > ~/certs/svid_bundle.pem
@@ -675,6 +746,12 @@ sudo ./bin/spire-server entry show
 # - SPIFFE ID matches what you pass to --spiffe-id
 # - FederatesWith lists the peer's trust domain
 # - Selector matches: unix:uid:<your-uid>
+```
+
+## Delete old scoreboard entries
+
+```bash
+rm -f ~/.rps/scores.json
 ```
 
 ---
