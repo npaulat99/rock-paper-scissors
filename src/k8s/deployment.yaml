@@ -18,10 +18,20 @@ spec:
         app.kubernetes.io/name: rock-paper-scissors
     spec:
       serviceAccountName: rps-game
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: rps-game
           image: ghcr.io/npaulat99/rock-paper-scissors:latest
           imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 9002
               name: https
@@ -62,6 +72,12 @@ spec:
         # SPIFFE Helper sidecar - fetches and renews X.509 SVIDs
         - name: spiffe-helper
           image: ghcr.io/spiffe/spiffe-helper:0.11.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
           args:
             - "-config"
             - "/etc/spiffe-helper/helper.conf"

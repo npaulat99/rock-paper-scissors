@@ -17,6 +17,12 @@ COPY src/app/ /app/
 COPY scripts/container/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
+RUN addgroup -S rps && adduser -S rps -G rps \
+    && mkdir -p /app/certs \
+    && chown -R rps:rps /app
+
+USER rps
+
 ENV RPS_BIND=0.0.0.0:9002
 ENV RPS_MTLS=1
 ENV RPS_CERT_DIR=/app/certs
