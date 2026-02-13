@@ -9,7 +9,8 @@ services:
     environment:
       RPS_BIND: "0.0.0.0:9002"
       RPS_MTLS: "1"
-      RPS_SPIFFE_ID: "spiffe://noah.inter-cloud-thi.de/game-server-noah"
+      RPS_SPIFFE_ID: "${RPS_SPIFFE_ID:?Set RPS_SPIFFE_ID e.g. spiffe://noah.inter-cloud-thi.de/game-server-noah}"
       RPS_CERT_DIR: "/app/certs"
+      RPS_SIGN_MOVES: "${RPS_SIGN_MOVES:-1}"
     volumes:
       - ./certs:/app/certs:ro

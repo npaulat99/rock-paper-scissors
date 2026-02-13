@@ -324,36 +324,33 @@ def _sign_move(
     signer_spiffe_id: str,
     ssh_key_path: str = "~/.ssh/id_ed25519",
 ) -> SignedMove:
-    """Sign a move using the configured method."""
+    """Sign a move using the configured method, cascading through fallbacks.
+
+    Priority: sigstore → ssh → unsigned.
+    If Sigstore OIDC fails (common on headless VMs), SSH is tried automatically.
+    """
+    kwargs = dict(move=move, match_id=match_id, round=round_no,
+                  signer_spiffe_id=signer_spiffe_id)
+
+    # Try Sigstore first if configured
     if signing_method == "sigstore":
         try:
-            return sign_move_sigstore(
-                move=move, match_id=match_id, round=round_no,
-                signer_spiffe_id=signer_spiffe_id,
-            )
+            return sign_move_sigstore(**kwargs)
         except Exception as exc:
-            print(f"  ⚠ Sigstore signing failed ({exc}), move sent unsigned")
-            return create_unsigned_move(
-                move=move, match_id=match_id, round=round_no,
-                signer_spiffe_id=signer_spiffe_id,
-            )
-    if signing_method == "ssh":
-        try:
-            return sign_move_ssh(
-                move=move, match_id=match_id, round=round_no,
-                signer_spiffe_id=signer_spiffe_id,
-                ssh_key_path=ssh_key_path,
-            )
-        except Exception as exc:
-            print(f"  ⚠ SSH signing failed ({exc}), move sent unsigned")
-            return create_unsigned_move(
-                move=move, match_id=match_id, round=round_no,
-                signer_spiffe_id=signer_spiffe_id,
-            )
-    return create_unsigned_move(
-        move=move, match_id=match_id, round=round_no,
-        signer_spiffe_id=signer_spiffe_id,
-    )
+            print(f"  ⚠ Sigstore signing failed ({exc}), trying SSH fallback...")
+
+    # Try SSH if configured or as fallback from Sigstore
+    if signing_method in ("sigstore", "ssh"):
+        ssh_key = os.path.expanduser(ssh_key_path)
+        if os.path.exists(ssh_key):
+            try:
+                return sign_move_ssh(**kwargs, ssh_key_path=ssh_key_path)
+            except Exception as exc:
+                print(f"  ⚠ SSH signing failed ({exc}), move sent unsigned")
+        elif signing_method == "ssh":
+            print(f"  ⚠ SSH key not found at {ssh_key_path}, move sent unsigned")
+
+    return create_unsigned_move(**kwargs)
 
 
 def _wait_for(predicate, timeout_seconds: int) -> None:

@@ -269,9 +269,18 @@ mkdir -p ~/certs && rm -f ~/certs/*
 SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
   ./bin/spire-agent api fetch x509 -write ~/certs/
 
+# Verify files were created
 ls ~/certs/
 # Expected: svid.0.pem  svid.0.key  bundle.0.pem
-# (no federated_bundle yet — single domain only)
+
+# If you see "no identity issued" or ~/certs is empty, wait and retry:
+if [ ! -f ~/certs/bundle.0.pem ]; then
+  echo "Certs not ready, waiting 30s..."
+  sleep 30
+  SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
+    ./bin/spire-agent api fetch x509 -write ~/certs/
+  ls ~/certs/
+fi
 
 # Prepare cert files for the game
 cp ~/certs/bundle.0.pem ~/certs/svid_bundle.pem

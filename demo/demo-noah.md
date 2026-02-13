@@ -24,9 +24,13 @@ Personalized step-by-step guide for the live demo.
 
 # Phase 1: Single Trust Domain (15 pts)
 
-> **Goal:** Noah runs the SPIRE server. Both Noah and Raghad get identities
-> under `noah.inter-cloud-thi.de`. They play a game over mTLS on the same
-> trust domain.
+> **Goal:** Raghad runs the SPIRE server. You connect to **Raghad's** server
+> and get an identity under `raghad.inter-cloud-thi.de`. You play a game
+> over mTLS on the same trust domain.
+>
+> **You need from Raghad:**
+> 1. A **join token** (one-time use string)
+> 2. Her **bootstrap bundle** (certificate text)
 
 ## Step 1 — Install SPIRE
 
@@ -35,13 +39,183 @@ cd ~
 wget https://github.com/spiffe/spire/releases/download/v1.13.3/spire-1.13.3-linux-amd64-musl.tar.gz
 tar -xzf spire-1.13.3-linux-amd64-musl.tar.gz
 cd spire-1.13.3
-sudo mkdir -p /opt/spire/server /opt/spire/agent
-sudo mkdir -p /tmp/spire-server /tmp/spire-agent
+sudo mkdir -p /opt/spire/agent
+sudo mkdir -p /tmp/spire-agent/data /tmp/spire-agent/public
 ```
 
-## Step 2 — Configure & Start SPIRE Server
+> You do **not** need to set up a SPIRE server for Phase 1. Raghad's server
+> handles everything.
+
+## Step 2 — Save Raghad's Bootstrap Bundle
+
+Paste the bootstrap bundle text that Raghad sent you:
 
 ```bash
+cat > /tmp/raghad-bootstrap.crt <<'CERTEOF'
+<PASTE RAGHAD'S BOOTSTRAP BUNDLE HERE>
+CERTEOF
+```
+
+## Step 3 — Configure Agent (Points to Raghad's Server)
+
+```bash
+sudo mkdir -p /opt/spire/agent
+
+sudo tee /opt/spire/agent/agent.conf > /dev/null <<'EOF'
+agent {
+  data_dir = "/tmp/spire-agent/data"
+  log_level = "INFO"
+  server_address = "4.185.211.9"
+  server_port = "8081"
+  socket_path = "/tmp/spire-agent/public/api.sock"
+  trust_domain = "raghad.inter-cloud-thi.de"
+  trust_bundle_path = "/tmp/raghad-bootstrap.crt"
+}
+
+plugins {
+  NodeAttestor "join_token" {
+    plugin_data {}
+  }
+  KeyManager "disk" {
+    plugin_data {
+      directory = "/tmp/spire-agent/data"
+    }
+  }
+  WorkloadAttestor "unix" {
+    plugin_data {}
+  }
+}
+EOF
+```
+
+> Note: `server_address` is **Raghad's IP** (`4.185.211.9`), not yours.
+> `trust_domain` is **Raghad's** trust domain.
+
+## Step 4 — Start Agent with Raghad's Token
+
+Replace `<TOKEN_FROM_RAGHAD>` with the actual token Raghad sent you:
+
+```bash
+cd ~/spire-1.13.3
+
+sudo pkill -f spire-agent || true
+sleep 3
+sudo rm -rf /tmp/spire-agent/data/*
+sudo rm -f /tmp/spire-agent/public/api.sock
+
+sudo nohup ./bin/spire-agent run \
+  -config /opt/spire/agent/agent.conf \
+  -joinToken <TOKEN_FROM_RAGHAD> > /tmp/spire-agent.log 2>&1 &
+sleep 30
+
+# Verify — look for "Creating X509-SVID"
+sudo tail -20 /tmp/spire-agent.log
+```
+
+## Step 5 — Fetch Certificates
+
+```bash
+cd ~/spire-1.13.3
+
+mkdir -p ~/certs && rm -f ~/certs/*
+SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
+  ./bin/spire-agent api fetch x509 -write ~/certs/
+
+ls ~/certs/
+# Expected: svid.0.pem  svid.0.key  bundle.0.pem
+
+# Retry if empty
+if [ ! -f ~/certs/bundle.0.pem ]; then
+  echo "Certs not ready, waiting 30s..."
+  sleep 30
+  SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
+    ./bin/spire-agent api fetch x509 -write ~/certs/
+  ls ~/certs/
+fi
+
+# Prepare cert files for the game
+cp ~/certs/bundle.0.pem ~/certs/svid_bundle.pem
+mv ~/certs/svid.0.pem ~/certs/svid.pem
+mv ~/certs/svid.0.key ~/certs/svid_key.pem
+
+# Should show 1 CA (Raghad's)
+grep -c "BEGIN CERTIFICATE" ~/certs/svid_bundle.pem
+```
+
+> **"no identity issued"?** Ask Raghad to check that your workload entry exists
+> on her server: `sudo ./bin/spire-server entry show`. Your UID must match
+> the selector in the entry. Run `id -u` and tell Raghad.
+
+## Step 6 — Start the Game
+
+Your identity is `spiffe://raghad.inter-cloud-thi.de/game-server-noah` — same
+trust domain as Raghad.
+
+```bash
+./rps-game \
+  --bind 0.0.0.0:9002 \
+  --spiffe-id spiffe://raghad.inter-cloud-thi.de/game-server-noah \
+  --public-url https://4.185.66.130:9002 \
+  --mtls --cert-dir ~/certs \
+  --sign-moves
+```
+
+You should see:
+
+```text
+============================================================
+  Rock-Paper-Scissors — Interactive Mode
+  SPIFFE ID : spiffe://raghad.inter-cloud-thi.de/game-server-noah
+  Listening : https://0.0.0.0:9002
+  Scoreboard: https://0.0.0.0:9002/v1/rps/scores
+  Signing   : ssh
+============================================================
+
+rps>
+```
+
+## Step 7 — Challenge Raghad (Same Trust Domain)
+
+Both on `raghad.inter-cloud-thi.de` — no federation needed:
+
+```text
+rps> challenge https://4.185.211.9:9002 spiffe://raghad.inter-cloud-thi.de/game-server-raghad
+Round 1 — choose (r)ock, (p)aper, (s)cissors: r
+```
+
+```text
+rps> scores
+```
+
+**Show the grader:**
+- ✅ **Single trust domain** — SPIRE running, mTLS game (7 pts)
+- ✅ **Visible SPIFFE IDs** — banner + peer identity on challenge (5 pts)
+- ✅ **Score tracking** — `scores` command (3 pts)
+
+---
+
+# Phase 2: Federated Reconfiguration (7 pts)
+
+> **Goal:** You now set up your **own** SPIRE server with trust domain
+> `noah.inter-cloud-thi.de`. You and Raghad exchange bundles, re-register
+> workloads with `-federatesWith`, and play cross-domain.
+>
+> **Raghad waits** while you set up your server. Tell her when you're ready.
+
+**Stop the game** (`quit` in the rps prompt) and stop the Phase 1 agent:
+
+```bash
+sudo pkill -f spire-agent
+```
+
+## Step 1 — Set Up Your Own SPIRE Server
+
+### Configure server:
+
+```bash
+sudo mkdir -p /opt/spire/server
+sudo mkdir -p /tmp/spire-server/data
+
 sudo tee /opt/spire/server/server.conf > /dev/null <<'EOF'
 server {
   bind_address = "0.0.0.0"
@@ -77,19 +251,15 @@ plugins {
 EOF
 ```
 
-Start the server:
+### Start server:
 
 ```bash
 cd ~/spire-1.13.3
 
 sudo pkill -f spire-server || true
-sudo pkill -f spire-agent || true
 sleep 2
-
 sudo rm -f /tmp/spire-server/private/api.sock
-sudo rm -f /tmp/spire-agent/public/api.sock
 sudo mkdir -p /tmp/spire-server/data
-sudo mkdir -p /tmp/spire-agent/data /tmp/spire-agent/public
 
 sudo nohup ./bin/spire-server run -config /opt/spire/server/server.conf > /tmp/spire-server.log 2>&1 &
 sleep 5
@@ -98,7 +268,7 @@ sudo ./bin/spire-server healthcheck
 sudo ./bin/spire-server bundle show > /tmp/bootstrap-bundle.crt
 ```
 
-## Step 3 — Configure & Start SPIRE Agent
+### Configure agent (now points to YOUR server):
 
 ```bash
 sudo tee /opt/spire/agent/agent.conf > /dev/null <<'EOF'
@@ -128,201 +298,42 @@ plugins {
 EOF
 ```
 
-Start the agent:
+### Start agent:
 
 ```bash
 cd ~/spire-1.13.3
 
-TOKEN=$(sudo ./bin/spire-server token generate \
-  -spiffeID spiffe://noah.inter-cloud-thi.de/agent/myagent \
-  | grep Token | awk '{print $2}')
-echo "Token: $TOKEN"
-
-sudo nohup ./bin/spire-agent run \
-  -config /opt/spire/agent/agent.conf \
-  -joinToken $TOKEN > /tmp/spire-agent.log 2>&1 &
-sleep 5
-
-ls -la /tmp/spire-agent/public/api.sock
-```
-
-## Step 4 — Register Workloads
-
-Register **both** players on your server (single trust domain):
-
-```bash
-cd ~/spire-1.13.3
-
-# Clean up any stale entries
-sudo ./bin/spire-server entry show
-# sudo ./bin/spire-server entry delete -entryID <ID>  # if any exist
-
-# Register YOUR workload
-sudo ./bin/spire-server entry create \
-  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-noah \
-  -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
-  -selector unix:uid:$(id -u)
-
-# Register RAGHAD's workload (she'll connect a remote agent)
-sudo ./bin/spire-server entry create \
-  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-raghad \
-  -parentID spiffe://noah.inter-cloud-thi.de/agent/raghad-agent \
-  -selector unix:uid:1000
-
-# Verify — should show 2 entries, no FederatesWith
-sudo ./bin/spire-server entry show
-```
-
-> **UID note:** `unix:uid:1000` is the default Azure VM user. If Raghad's UID
-> is different, have her run `id -u` and update the entry.
-
-## Step 5 — Fetch Your Certificates
-
-Restart the agent so it picks up the new workload entry:
-
-```bash
-cd ~/spire-1.13.3
-
-sudo pkill -f spire-agent
-sleep 3
 sudo rm -rf /tmp/spire-agent/data/*
 sudo rm -f /tmp/spire-agent/public/api.sock
 
 TOKEN=$(sudo ./bin/spire-server token generate \
   -spiffeID spiffe://noah.inter-cloud-thi.de/agent/myagent \
   | grep Token | awk '{print $2}')
+
 sudo nohup ./bin/spire-agent run \
   -config /opt/spire/agent/agent.conf \
   -joinToken $TOKEN > /tmp/spire-agent.log 2>&1 &
-sleep 30
-
-# Verify — look for "Creating X509-SVID"
-sudo tail -20 /tmp/spire-agent.log
-
-# Fetch certs
-mkdir -p ~/certs && rm -f ~/certs/*
-SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
-  ./bin/spire-agent api fetch x509 -write ~/certs/
-
-ls ~/certs/
-# Expected: svid.0.pem  svid.0.key  bundle.0.pem
-
-# Retry if empty
-if [ ! -f ~/certs/bundle.0.pem ]; then
-  echo "Certs not ready, waiting 30s..."
-  sleep 30
-  SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock \
-    ./bin/spire-agent api fetch x509 -write ~/certs/
-  ls ~/certs/
-fi
-
-# Prepare cert files for the game
-cp ~/certs/bundle.0.pem ~/certs/svid_bundle.pem
-mv ~/certs/svid.0.pem ~/certs/svid.pem
-mv ~/certs/svid.0.key ~/certs/svid_key.pem
-
-# Should show 1 CA
-grep -c "BEGIN CERTIFICATE" ~/certs/svid_bundle.pem
+sleep 5
 ```
 
-## Step 6 — Send Token & Bundle to Raghad
-
-Raghad needs two things to connect her agent to your server:
+### Register your workload (no federation yet):
 
 ```bash
 cd ~/spire-1.13.3
 
-# 1. Generate a join token for Raghad
-TOKEN_RAGHAD=$(sudo ./bin/spire-server token generate \
-  -spiffeID spiffe://noah.inter-cloud-thi.de/agent/raghad-agent \
-  | grep Token | awk '{print $2}')
-echo "=== SEND THIS TOKEN TO RAGHAD: $TOKEN_RAGHAD ==="
+sudo ./bin/spire-server entry create \
+  -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-noah \
+  -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
+  -selector unix:uid:$(id -u)
 
-# 2. Show your bootstrap bundle (Raghad needs this too)
-echo "=== ALSO SEND THIS BUNDLE TO RAGHAD ==="
-cat /tmp/bootstrap-bundle.crt
+sudo ./bin/spire-server entry show
 ```
 
-> **NSG:** Open inbound TCP **8081** on your VM so Raghad's agent can reach your server.
+> **NSG:** Open inbound TCP **8443** on your VM for the bundle endpoint.
+>
+> Tell Raghad: "My server is up, port 8443 is open — proceed with Phase 2."
 
-**Send Raghad:**
-1. The join token
-2. The bootstrap bundle (certificate text)
-
-Then tell her to follow "Phase 1" in her guide (demo-raghad.md).
-
-## Step 7 — Start the Game
-
-Wait for Raghad to confirm she has her certs, then start:
-
-```bash
-./rps-game \
-  --bind 0.0.0.0:9002 \
-  --spiffe-id spiffe://noah.inter-cloud-thi.de/game-server-noah \
-  --public-url https://4.185.66.130:9002 \
-  --mtls --cert-dir ~/certs \
-  --sign-moves
-```
-
-You should see:
-
-```text
-============================================================
-  Rock-Paper-Scissors — Interactive Mode
-  SPIFFE ID : spiffe://noah.inter-cloud-thi.de/game-server-noah
-  Listening : https://0.0.0.0:9002
-  Scoreboard: https://0.0.0.0:9002/v1/rps/scores
-  Signing   : sigstore
-============================================================
-
-Commands:
-  challenge <peer_url> <peer_spiffe_id>  — Start a match
-  scores                                 — Show scoreboard
-  quit / exit                            — Exit
-
-rps>
-```
-
-## Step 8 — Challenge Raghad (Same Trust Domain)
-
-Both on `noah.inter-cloud-thi.de` — no federation needed:
-
-```text
-rps> challenge https://4.185.211.9:9002 spiffe://noah.inter-cloud-thi.de/game-server-raghad
-Round 1 — choose (r)ock, (p)aper, (s)cissors: r
-```
-
-## Step 9 — Show Scores
-
-```text
-rps> scores
-```
-
-**Show the grader:**
-- ✅ **Single trust domain** — SPIRE running, mTLS game (7 pts)
-- ✅ **Visible SPIFFE IDs** — banner + peer identity on challenge (5 pts)
-- ✅ **Score tracking** — `scores` command (3 pts)
-
----
-
-# Phase 2: Federated Reconfiguration (7 pts)
-
-> **Goal:** Each player now runs their **own** SPIRE server with separate trust
-> domains. Exchange bundles, re-register workloads with `-federatesWith`, and
-> play cross-domain.
-
-**Stop the game** (`quit` in the rps prompt) before continuing.
-
-## Step 1 — Raghad Sets Up Her Own Server
-
-Tell Raghad to follow **Phase 2** in her guide (demo-raghad.md). She will:
-1. Set up her own SPIRE server with trust domain `raghad.inter-cloud-thi.de`
-2. Register her own workload entry
-3. Fetch her own certs
-
-Wait for her to confirm her SPIRE server is running and port 8443 is open.
-
-## Step 2 — Exchange Bundles
+## Step 2 — Exchange Bundles with Raghad
 
 ### Option A: Bundle Endpoint (recommended)
 
@@ -369,40 +380,22 @@ sudo ./bin/spire-server bundle list
 # Should show BOTH trust domains
 ```
 
-### Option C: Automated Script (requires repo clone)
-
-```bash
-chmod +x scripts/demo/setup-federation-auto.sh
-./scripts/demo/setup-federation-auto.sh raghad.inter-cloud-thi.de 4.185.211.9
-```
-
 ## Step 3 — Re-register Workload WITH Federation
-
-Delete the old entry and re-create with `-federatesWith`:
 
 ```bash
 cd ~/spire-1.13.3
 
-# List entries and note the Entry ID for game-server-noah
+# Delete old entry
 sudo ./bin/spire-server entry show
+sudo ./bin/spire-server entry delete -entryID <OLD_ENTRY_ID>
 
-# Delete old entry (also delete raghad's Phase 1 entry if present)
-sudo ./bin/spire-server entry delete -entryID <NOAH_ENTRY_ID>
-sudo ./bin/spire-server entry delete -entryID <RAGHAD_PHASE1_ENTRY_ID>
-
-# Re-create YOUR entry WITH federation
+# Re-create WITH federation
 sudo ./bin/spire-server entry create \
   -spiffeID spiffe://noah.inter-cloud-thi.de/game-server-noah \
   -parentID spiffe://noah.inter-cloud-thi.de/agent/myagent \
   -selector unix:uid:$(id -u) \
   -federatesWith spiffe://raghad.inter-cloud-thi.de
 ```
-
-> For multiple peers, add more `-federatesWith` flags:
-> ```bash
-> -federatesWith spiffe://raghad.inter-cloud-thi.de \
-> -federatesWith spiffe://sven.inter-cloud-thi.de
-> ```
 
 ## Step 4 — Re-fetch Certificates
 
@@ -478,6 +471,10 @@ Already enabled via `--sign-moves`. The game auto-detects:
 | 1 | **Sigstore keyless** | `cosign` | OIDC → Fulcio cert → Rekor log |
 | 2 | **SSH key** | `ssh-keygen` | Signs with `~/.ssh/id_ed25519` |
 | 3 | Unsigned | — | Fallback |
+
+> On headless VMs, Sigstore OIDC may fail. The game automatically falls back
+> to SSH signing if `~/.ssh/id_ed25519` exists. Generate one if needed:
+> `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""`
 
 ---
 
