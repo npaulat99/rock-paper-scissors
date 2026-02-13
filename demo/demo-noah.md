@@ -66,7 +66,7 @@ agent {
   data_dir = "/tmp/spire-agent/data"
   log_level = "INFO"
   server_address = "4.185.211.9"
-  server_port = "8081"
+  server_port = "9000"
   socket_path = "/tmp/spire-agent/public/api.sock"
   trust_domain = "raghad.inter-cloud-thi.de"
   trust_bundle_path = "/tmp/raghad-bootstrap.crt"
@@ -93,6 +93,22 @@ EOF
 
 ## Step 4 — Start Agent with Raghad's Token
 
+**Before starting:** verify you can reach Raghad's SPIRE server:
+
+```bash
+nc -zv -w 5 4.185.211.9 9000
+# Should say "Connection ... succeeded" or "open"
+```
+
+> **If timeout:** Admin has opened ports 9000-9005 in NSG. Raghad must also run:
+>
+> ```bash
+> sudo ufw allow 9000/tcp  # SPIRE server
+> sudo ufw allow 9002/tcp  # Game
+> ```
+>
+> Wait 30-60 seconds, then retry `nc -zv -w 5 4.185.211.9 9000`.
+
 Replace `<TOKEN_FROM_RAGHAD>` with the actual token Raghad sent you:
 
 ```bash
@@ -100,7 +116,7 @@ cd ~/spire-1.13.3
 
 sudo pkill -f spire-agent || true
 sleep 3
-sudo rm -rf /tmp/spire-agent/data/*
+sudo rm -rf /tmp/spire-agent/data/ 2>/dev/null; sudo mkdir -p /tmp/spire-agent/data
 sudo rm -f /tmp/spire-agent/public/api.sock
 
 sudo nohup ./bin/spire-agent run \
@@ -111,6 +127,9 @@ sleep 30
 # Verify — look for "Creating X509-SVID"
 sudo tail -20 /tmp/spire-agent.log
 ```
+
+> **"i/o timeout" or "connection refused"?** Raghad must run:
+> `sudo ufw allow 9000/tcp` (SPIRE server port).
 
 ## Step 5 — Fetch Certificates
 
@@ -219,7 +238,7 @@ sudo mkdir -p /tmp/spire-server/data
 sudo tee /opt/spire/server/server.conf > /dev/null <<'EOF'
 server {
   bind_address = "0.0.0.0"
-  bind_port = "8081"
+  bind_port = "9000"
   trust_domain = "noah.inter-cloud-thi.de"
   data_dir = "/tmp/spire-server/data"
   log_level = "INFO"
@@ -227,7 +246,7 @@ server {
   federation {
     bundle_endpoint {
       address = "0.0.0.0"
-      port = 8443
+      port = 9001
     }
   }
 }
@@ -276,7 +295,7 @@ agent {
   data_dir = "/tmp/spire-agent/data"
   log_level = "INFO"
   server_address = "127.0.0.1"
-  server_port = "8081"
+  server_port = "9000"
   socket_path = "/tmp/spire-agent/public/api.sock"
   trust_domain = "noah.inter-cloud-thi.de"
   trust_bundle_path = "/tmp/bootstrap-bundle.crt"
@@ -329,9 +348,15 @@ sudo ./bin/spire-server entry create \
 sudo ./bin/spire-server entry show
 ```
 
-> **NSG:** Open inbound TCP **8443** on your VM for the bundle endpoint.
+> **NSG:** Admin has opened ports 9000-9005. Also run:
 >
-> Tell Raghad: "My server is up, port 8443 is open — proceed with Phase 2."
+> ```bash
+> sudo ufw allow 9000/tcp  # SPIRE server
+> sudo ufw allow 9001/tcp  # Bundle endpoint
+> sudo ufw allow 9002/tcp  # Game
+> ```
+>
+> Tell Raghad: "My server is up, port 9001 is open — proceed with Phase 2."
 
 ## Step 2 — Exchange Bundles with Raghad
 
@@ -341,7 +366,7 @@ sudo ./bin/spire-server entry show
 cd ~/spire-1.13.3
 
 # Fetch Raghad's bundle from her server
-curl -sk https://4.185.211.9:8443 > /tmp/peer.bundle
+curl -sk https://4.185.211.9:9001 > /tmp/peer.bundle
 
 # Import it
 sudo ./bin/spire-server bundle set \
@@ -352,14 +377,14 @@ sudo ./bin/spire-server bundle set \
 # Set up automatic refresh
 sudo ./bin/spire-server federation create \
   -trustDomain raghad.inter-cloud-thi.de \
-  -bundleEndpointURL https://4.185.211.9:8443 \
+  -bundleEndpointURL https://4.185.211.9:9001 \
   -bundleEndpointProfile https_spiffe \
   -endpointSpiffeID spiffe://raghad.inter-cloud-thi.de/spire/server \
   -trustDomainBundlePath /tmp/peer.bundle \
   -trustDomainBundleFormat spiffe
 ```
 
-> **NSG:** Both VMs need inbound TCP **8443** open.
+> **NSG:** Both VMs need inbound TCP **9001** open (bundle endpoint).
 
 ### Option B: Manual Bundle Exchange
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Automated federation setup using the peer's SPIRE bundle endpoint (port 8443).
+# Automated federation setup using the peer's SPIRE bundle endpoint (port 9001).
 #
 # This replaces the manual "copy-paste JSON bundle" workflow.
 # Both sides must have the bundle_endpoint block in their server.conf.
@@ -41,13 +41,13 @@ if [[ ! -x "$SPIRE_BIN" ]]; then
 fi
 
 BUNDLE_FILE="/tmp/${PEER_DOMAIN}.bundle"
-BUNDLE_ENDPOINT="https://${PEER_ADDR}:8443"
+BUNDLE_ENDPOINT="https://${PEER_ADDR}:9001"
 
 # ── Step 1: Fetch the peer's trust bundle from their bundle endpoint ──
 echo "== Fetching bundle from $BUNDLE_ENDPOINT =="
 if ! curl -sk --connect-timeout 5 "$BUNDLE_ENDPOINT" -o "$BUNDLE_FILE"; then
   echo "ERROR: Could not reach $BUNDLE_ENDPOINT" >&2
-  echo "Check that the peer's SPIRE server is running and port 8443 is open." >&2
+  echo "Check that the peer's SPIRE server is running and port 9001 is open." >&2
   exit 1
 fi
 

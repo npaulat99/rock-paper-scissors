@@ -19,7 +19,7 @@ PEER_BUNDLE_JSON="${4:-}"
 
 if [[ -z "$PEER_TRUST_DOMAIN" || -z "$PEER_BUNDLE_ENDPOINT_URL" || -z "$PEER_ENDPOINT_SPIFFE_ID" || -z "$PEER_BUNDLE_JSON" ]]; then
   echo "Usage: $0 <peer_trust_domain> <peer_bundle_endpoint_url> <peer_endpoint_spiffe_id> <peer_bundle_json_file>" >&2
-  echo "Example: $0 bob.inter-cloud-thi.de https://bob.inter-cloud-thi.de:8443 spiffe://bob.inter-cloud-thi.de/spire/server /tmp/bob.bundle" >&2
+  echo "Example: $0 bob.inter-cloud-thi.de https://bob.inter-cloud-thi.de:9001 spiffe://bob.inter-cloud-thi.de/spire/server /tmp/bob.bundle" >&2
   exit 1
 fi
 

@@ -112,7 +112,7 @@ sudo mkdir -p /tmp/spire-server /tmp/spire-agent
 sudo tee /opt/spire/server/server.conf > /dev/null <<'EOF'
 server {
   bind_address = "0.0.0.0"
-  bind_port = "8081"
+  bind_port = "9000"
   trust_domain = "<DOMAIN>"
   data_dir = "/tmp/spire-server/data"
   log_level = "INFO"
@@ -120,7 +120,7 @@ server {
   federation {
     bundle_endpoint {
       address = "0.0.0.0"
-      port = 8443
+      port = 9001
     }
   }
 }
@@ -154,7 +154,7 @@ agent {
   data_dir = "/tmp/spire-agent/data"
   log_level = "INFO"
   server_address = "127.0.0.1"
-  server_port = "8081"
+  server_port = "9000"
   socket_path = "/tmp/spire-agent/public/api.sock"
   trust_domain = "<DOMAIN>"
   trust_bundle_path = "/tmp/bootstrap-bundle.crt"
@@ -414,13 +414,13 @@ sudo ./bin/spire-server bundle list
 
 ## Option B: Bundle Endpoint (Automatic Fetch)
 
-Both SPIRE servers expose their bundle on port **8443** (configured in server.conf).
+Both SPIRE servers expose their bundle on port **9001** (configured in server.conf).
 
 ```bash
 cd ~/spire-1.13.3
 
 # Fetch the peer's bundle directly
-curl -sk https://<PEER_IP>:8443 > /tmp/peer.bundle
+curl -sk https://<PEER_IP>:9001 > /tmp/peer.bundle
 
 # Import it
 sudo ./bin/spire-server bundle set \
@@ -431,14 +431,14 @@ sudo ./bin/spire-server bundle set \
 # Set up automatic refresh
 sudo ./bin/spire-server federation create \
   -trustDomain <PEER_DOMAIN> \
-  -bundleEndpointURL https://<PEER_IP>:8443 \
+  -bundleEndpointURL https://<PEER_IP>:9001 \
   -bundleEndpointProfile https_spiffe \
   -endpointSpiffeID spiffe://<PEER_DOMAIN>/spire/server \
   -trustDomainBundlePath /tmp/peer.bundle \
   -trustDomainBundleFormat spiffe
 ```
 
-> **NSG:** Ensure Azure NSG allows inbound TCP **8443** on both VMs.
+> **NSG:** Admin has opened ports 9000-9005. Also run: `sudo ufw allow 9000:9002/tcp`
 
 ## Option C: Fully Automated Script
 

@@ -45,7 +45,7 @@ sudo mkdir -p /tmp/spire-server /tmp/spire-agent
 sudo tee /opt/spire/server/server.conf > /dev/null <<'EOF'
 server {
   bind_address = "0.0.0.0"
-  bind_port = "8081"
+  bind_port = "9000"
   trust_domain = "raghad.inter-cloud-thi.de"
   data_dir = "/tmp/spire-server/data"
   log_level = "INFO"
@@ -53,7 +53,7 @@ server {
   federation {
     bundle_endpoint {
       address = "0.0.0.0"
-      port = 8443
+      port = 9001
     }
   }
 }
@@ -98,6 +98,16 @@ sudo ./bin/spire-server healthcheck
 sudo ./bin/spire-server bundle show > /tmp/bootstrap-bundle.crt
 ```
 
+> **CRITICAL — Azure NSG:** Admin has opened ports **9000-9005**. Also run on the VM:
+>
+> ```bash
+> sudo ufw allow 9000/tcp  # SPIRE server
+> sudo ufw allow 9001/tcp  # Bundle endpoint
+> sudo ufw allow 9002/tcp  # Game
+> ```
+>
+> Noah's agent **will timeout** if these ports aren't open in both NSG and ufw.
+
 ## Step 3 — Configure & Start SPIRE Agent
 
 ```bash
@@ -106,7 +116,7 @@ agent {
   data_dir = "/tmp/spire-agent/data"
   log_level = "INFO"
   server_address = "127.0.0.1"
-  server_port = "8081"
+  server_port = "9000"
   socket_path = "/tmp/spire-agent/public/api.sock"
   trust_domain = "raghad.inter-cloud-thi.de"
   trust_bundle_path = "/tmp/bootstrap-bundle.crt"
@@ -243,8 +253,6 @@ echo "=== ALSO SEND THIS BUNDLE TO NOAH ==="
 cat /tmp/bootstrap-bundle.crt
 ```
 
-> **NSG:** Open inbound TCP **8081** on your VM so Noah's agent can reach your server.
-
 **Send Noah:**
 1. The join token
 2. The bootstrap bundle (certificate text)
@@ -319,7 +327,7 @@ Tell Noah to set up his own SPIRE server (he follows Phase 2 in demo-noah.md).
 
 Wait for him to confirm:
 1. His SPIRE server is running
-2. Port 8443 is open in his NSG
+2. Port 9001 is open in his NSG
 
 ## Step 2 — Exchange Bundles
 
@@ -329,7 +337,7 @@ Wait for him to confirm:
 cd ~/spire-1.13.3
 
 # Fetch Noah's bundle from his server
-curl -sk https://4.185.66.130:8443 > /tmp/peer.bundle
+curl -sk https://4.185.66.130:9001 > /tmp/peer.bundle
 
 # Import it
 sudo ./bin/spire-server bundle set \
@@ -340,14 +348,14 @@ sudo ./bin/spire-server bundle set \
 # Set up automatic refresh
 sudo ./bin/spire-server federation create \
   -trustDomain noah.inter-cloud-thi.de \
-  -bundleEndpointURL https://4.185.66.130:8443 \
+  -bundleEndpointURL https://4.185.66.130:9001 \
   -bundleEndpointProfile https_spiffe \
   -endpointSpiffeID spiffe://noah.inter-cloud-thi.de/spire/server \
   -trustDomainBundlePath /tmp/peer.bundle \
   -trustDomainBundleFormat spiffe
 ```
 
-> **NSG:** Both VMs need inbound TCP **8443** open.
+> **NSG:** Both VMs need inbound TCP **9001** open (bundle endpoint).
 
 ### Option B: Manual Bundle Exchange
 

@@ -11,7 +11,7 @@ load_spire_env
 
 SPIRE_SERVER_BIN="${SPIRE_SERVER_BIN:-/opt/spire/bin/spire-server}"
 SPIFFE_AGENT_SOCKET="${SPIFFE_AGENT_SOCKET:-/tmp/spire-agent/public/api.sock}"
-BUNDLE_ENDPOINT="${BUNDLE_ENDPOINT:-https://${TRUST_DOMAIN}:8443}"
+BUNDLE_ENDPOINT="${BUNDLE_ENDPOINT:-https://${TRUST_DOMAIN}:9001}"
 RPS_PORT="${RPS_PORT:-9002}"
 
 GREEN="\033[0;32m"
