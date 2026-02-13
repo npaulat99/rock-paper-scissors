@@ -286,6 +286,7 @@ You should see:
 Commands:
   challenge <peer_url> <peer_spiffe_id>  — Start a match
   scores                                 — Show scoreboard
+  reset                                  — Clear scoreboard
   quit / exit                            — Exit
 
 rps>
@@ -320,6 +321,16 @@ rps> scores
 > with `-federatesWith`, and play cross-domain.
 
 **Stop the game** (`quit` in the rps prompt) before continuing.
+
+> **Clear scores first:** In Phase 2 Noah gets a new SPIFFE ID
+> (`spiffe://noah.inter-cloud-thi.de/...` instead of `spiffe://raghad.inter-cloud-thi.de/...`),
+> so old Phase 1 entries would linger. Before stopping, type `reset` in the rps prompt
+> to clear the scoreboard, or delete the file after quitting:
+>
+> ```bash
+> rm -f ~/.rps/scores.json
+> sudo rm -f /root/.rps/scores.json  # if you ever ran with sudo
+> ```
 
 ## Step 1 — Wait for Noah
 
@@ -585,5 +596,6 @@ docker stop $(docker ps -q --filter ancestor=ghcr.io/npaulat99/rock-paper-scisso
 sudo rm -rf /tmp/spire-server /tmp/spire-agent /tmp/bootstrap-bundle.crt
 sudo rm -f /tmp/spire-server.log /tmp/spire-agent.log
 rm -f ~/.rps/scores.json
+sudo rm -f /root/.rps/scores.json
 ```
 

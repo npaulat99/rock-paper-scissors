@@ -223,6 +223,16 @@ rps> scores
 
 **Stop the game** (`quit` in the rps prompt) and stop the Phase 1 agent:
 
+> **Clear scores first:** In Phase 2 you get a new SPIFFE ID
+> (`spiffe://noah.inter-cloud-thi.de/...` instead of `spiffe://raghad.inter-cloud-thi.de/...`),
+> so old Phase 1 entries would linger. Before stopping, type `reset` in the rps prompt
+> to clear the scoreboard, or delete the file after quitting:
+>
+> ```bash
+> rm -f ~/.rps/scores.json
+> sudo rm -f /root/.rps/scores.json  # if you ever ran with sudo
+> ```
+
 ```bash
 sudo pkill -f spire-agent
 ```
@@ -609,5 +619,6 @@ docker stop $(docker ps -q --filter ancestor=ghcr.io/npaulat99/rock-paper-scisso
 sudo rm -rf /tmp/spire-server /tmp/spire-agent /tmp/bootstrap-bundle.crt
 sudo rm -f /tmp/spire-server.log /tmp/spire-agent.log
 rm -f ~/.rps/scores.json
+sudo rm -f /root/.rps/scores.json
 ```
 

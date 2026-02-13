@@ -343,6 +343,7 @@ The startup banner displays your SPIFFE identity, the mTLS status, and move sign
 Commands:
   challenge <peer_url> <peer_spiffe_id>  — Start a match
   scores                                 — Show scoreboard
+  reset                                  — Clear scoreboard
   quit / exit                            — Exit
 
 rps>
@@ -780,8 +781,11 @@ SVIDs expire after ~1 hour. Re-fetch certs (step 7) — no bundle re-exchange ne
 
 ## Delete old scoreboard entries
 
+Type `reset` in the game prompt, or delete the files:
+
 ```bash
 rm -f ~/.rps/scores.json
+sudo rm -f /root/.rps/scores.json  # if you ever ran with sudo
 ```
 
 ---
@@ -802,6 +806,7 @@ rock-paper-scissors/
 │       └── setup-federation-auto.sh  # One-command federation setup
 ├── src/
 │   ├── app/
+│   │   ├── acme_scoreboard.py  # Public WebPKI/Let's Encrypt scoreboard on port 443
 │   │   ├── cli.py           # Interactive CLI (serve + challenge in one process)
 │   │   ├── commit_reveal.py # SHA256 commitment scheme
 │   │   ├── http_api.py      # HTTP server with mTLS

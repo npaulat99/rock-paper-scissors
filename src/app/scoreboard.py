@@ -49,6 +49,10 @@ class ScoreBoard:
         score.losses += 1
         self.save()
 
+    def reset(self) -> None:
+        self._scores.clear()
+        self.save()
+
     def get(self, peer_spiffe_id: str) -> Score:
         return self._scores.get(peer_spiffe_id, Score())
 

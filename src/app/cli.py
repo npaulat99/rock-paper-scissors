@@ -145,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     print("Commands:")
     print("  challenge <peer_url> <peer_spiffe_id>  — Start a match")
     print("  scores                                 — Show scoreboard")
+    print("  reset                                  — Clear scoreboard")
     print("  help                                   — Show commands")
     print("  quit / exit                            — Exit")
     print()
@@ -171,10 +172,16 @@ def main(argv: list[str] | None = None) -> int:
             print(state.scoreboard.format_table())
             continue
 
+        if cmd in ("reset",):
+            state.scoreboard.reset()
+            print("Scoreboard cleared.")
+            continue
+
         if cmd in ("help", "h", "?"):
             print("Commands:")
             print("  challenge <peer_url> <peer_spiffe_id>  — Start a match")
             print("  scores                                 — Show scoreboard")
+            print("  reset                                  — Clear scoreboard")
             print("  quit / exit                            — Exit")
             continue
 
