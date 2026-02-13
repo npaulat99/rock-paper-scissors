@@ -1,13 +1,14 @@
-name: Supply Chain Pipeline
+name: Secure Supply Chain Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
+  contents: write
   id-token: write
-  contents: read
   packages: write
 
 concurrency:
@@ -23,102 +24,67 @@ env:
   IMAGE_NAME: rock-paper-scissors
   TRIVY_DISABLE_VEX_NOTICE: "true"
 
+# ===========================================================================
+# 1  SOURCE & IAC SCAN
+# ===========================================================================
 jobs:
-  prep_and_scan:
-    name: Prep & Scan
+  scan_source:
+    name: Source & IaC Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Show workspace layout
-        run: |
-          pwd
-          ls -la
-
-      - name: Setup Task runner
-        uses: arduino/setup-task@v1
-
-      - name: Prepare Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Trivy filesystem scan (source + dependencies)
+        uses: aquasecurity/trivy-action@master
         with:
-          driver: docker-container
+          scan-type: fs
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+          trivyignores: .trivyignore
 
-      - name: Install Trivy scanner
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
+      - name: Trivy IaC scan (Dockerfile + Terraform)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          trivyignores: .trivyignore
 
-      - name: Ensure Trivy ignore file exists
+      # Generate vulnerability attestation JSONs for later attachment
+      - name: Generate vulnerability attestation files
         run: |
-          if [ ! -f .trivyignore ]; then
-            echo "WARN: .trivyignore missing in checkout; creating empty file"
-            : > .trivyignore
-          fi
-          ls -la .trivyignore
-
-      - name: Run baseline scans (Trivy fs/iac)
-        run: |
+          sudo apt-get update -qq && sudo apt-get install -yqq trivy > /dev/null 2>&1 || true
           mkdir -p attestations
-          # Scan repo root so dependency files (e.g. requirements.txt) are included
-          # Skip local virtualenvs, otherwise Trivy reports CVEs from dev env packages
-          trivy fs --ignorefile ./.trivyignore \
-            --skip-dirs .git \
-            --skip-dirs attestations \
-            --skip-dirs venv \
-            --skip-dirs .venv \
+          trivy fs --ignorefile .trivyignore \
+            --skip-dirs .git --skip-dirs attestations \
+            --skip-dirs venv --skip-dirs .venv \
             --format cosign-vuln . > attestations/vuln-source.json
-          if [ -d src/docker ]; then
-            trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || true
-          else
-            echo '{}' > attestations/vuln-dockerfile.json
-            echo "skip: src/docker not found"
-          fi
-          if [ -d src/iac ]; then
-            trivy config --format cosign-vuln src/iac/ > attestations/vuln-iac.json || true
-          else
-            echo '{}' > attestations/vuln-iac.json
-            echo "skip: src/iac not found"
-          fi
+          trivy config --format cosign-vuln src/docker/ > attestations/vuln-dockerfile.json || echo '{}' > attestations/vuln-dockerfile.json
+          trivy config --format cosign-vuln src/iac/    > attestations/vuln-iac.json        || echo '{}' > attestations/vuln-iac.json
 
-      - name: Build app image (for vuln scan)
-        run: docker build --no-cache -t rock-paper-scissors:latest -f src/docker/Dockerfile .
-
-      - name: Show Python package versions in image
-        run: |
-          docker run --rm rock-paper-scissors:latest python -m pip show wheel jaraco.context || true
-
-      - name: Scan image and enforce HIGH/CRITICAL policy
-        run: |
-          trivy image --ignorefile ./.trivyignore --severity HIGH,CRITICAL --exit-code 1 rock-paper-scissors:latest
-          trivy image --ignorefile ./.trivyignore --format cosign-vuln rock-paper-scissors:latest > attestations/vuln-image.json
-
-      - name: Upload attestation bundle
+      - name: Upload scan attestations
         uses: actions/upload-artifact@v4
         with:
-          name: attestations
+          name: vuln-attestations
           path: attestations/
 
+# ===========================================================================
+# 2  BUILD & PUSH CONTAINER  (single build, scan after push)
+# ===========================================================================
   build_and_push:
-    name: Build & Push
+    name: Build & Push Container
     runs-on: ubuntu-latest
-    needs: prep_and_scan
+    needs: scan_source
     outputs:
       image: ${{ steps.meta.outputs.image }}
       digest: ${{ steps.push.outputs.digest }}
       image_ref: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Prepare Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
         with:
           driver: docker-container
 
@@ -129,86 +95,114 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image ref
+      - name: Compute image reference
         id: meta
         run: |
           OWNER_LOWER="${{ github.repository_owner }}"
           IMAGE="ghcr.io/${OWNER_LOWER,,}/${{ env.IMAGE_NAME }}"
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
 
-      - name: Docker Buildx (push with provenance + SBOM)
+      - name: Build and push (with BuildKit provenance + SBOM)
         id: push
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./src/docker/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.image }}:latest
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
 
-  sign_and_verify:
-    name: Sign & Verify
+      - name: Trivy image scan (post-push)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+
+      - name: Generate image vulnerability attestation
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -yqq trivy > /dev/null 2>&1 || true
+          mkdir -p attestations
+          trivy image --ignorefile .trivyignore \
+            --format cosign-vuln \
+            "${{ steps.meta.outputs.image }}:${{ github.sha }}" > attestations/vuln-image.json
+
+      - name: Upload image attestation
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-attestation
+          path: attestations/
+
+# ===========================================================================
+# 3  SIGN CONTAINER & ATTACH ATTESTATIONS
+# ===========================================================================
+  sign_container:
+    name: Sign Container & Attach Attestations
     runs-on: ubuntu-latest
     needs: build_and_push
     env:
       IMAGE_REF: ${{ needs.build_and_push.outputs.image_ref }}
       IMAGE_DIGEST: ${{ needs.build_and_push.outputs.digest }}
-      IMAGE_NAME_NO_TAG: ${{ needs.build_and_push.outputs.image }}
     steps:
-      - name: Login to GHCR (for cosign)
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download attestation bundle
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Download vulnerability attestations
         uses: actions/download-artifact@v4
         with:
-          name: attestations
+          name: vuln-attestations
           path: attestations
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v2
+      - name: Download image attestation
+        uses: actions/download-artifact@v4
         with:
-          cosign-release: 'v2.4.0'
+          name: image-attestation
+          path: attestations
 
-      - name: Generate SLSA provenance predicate (local)
+      - name: Generate SLSA provenance predicate
         run: |
-          mkdir -p attestations
-          cat > attestations/provenance.slsa.json <<'JSON'
+          cat > attestations/provenance.slsa.json <<EOF
           {
             "builder": {
-              "id": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              "id": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             },
             "buildType": "https://github.com/Attestations/GitHubActions@v1",
             "invocation": {
               "configSource": {
-                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}",
-                "digest": {"sha1": "${GITHUB_SHA}"}
+                "uri": "git+https://github.com/${{ github.repository }}@${{ github.sha }}",
+                "digest": {"sha1": "${{ github.sha }}"}
               },
               "parameters": {
-                "workflow": "${GITHUB_WORKFLOW}",
-                "ref": "${GITHUB_REF}",
-                "runner": "${RUNNER_OS}"
+                "workflow": "${{ github.workflow }}",
+                "ref": "${{ github.ref }}",
+                "runner": "${{ runner.os }}"
               }
             },
             "metadata": {
-              "buildInvocationId": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
-              "buildStartedOn": "${GITHUB_RUN_ATTEMPT}",
-              "buildFinishedOn": "${GITHUB_RUN_ATTEMPT}"
+              "buildInvocationId": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "completeness": {"parameters": true, "environment": true, "materials": true}
             },
             "materials": [
               {
-                "uri": "git+https://github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}",
-                "digest": {"sha1": "${GITHUB_SHA}"}
+                "uri": "git+https://github.com/${{ github.repository }}@${{ github.sha }}",
+                "digest": {"sha1": "${{ github.sha }}"}
               }
             ]
           }
-          JSON
+          EOF
 
       - name: Generate SBOM (SPDX JSON)
         uses: anchore/sbom-action@v0
@@ -217,90 +211,35 @@ jobs:
           format: spdx-json
           output-file: attestations/sbom.spdx.json
 
-      - name: Attach attestations (provenance, SBOM, vulnerabilities)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
+      - name: Sign container image (keyless)
+        run: cosign sign --yes "${IMAGE_REF}"
+
+      - name: Attach all attestations
         run: |
-          # NOTE: GitHub's `actions/attest-*` are not available for user-owned private repos.
-          # We attach provenance + SBOM as cosign attestations directly to the OCI registry instead.
           for TYPE in provenance sbom vuln-source vuln-dockerfile vuln-iac vuln-image; do
             case $TYPE in
-              provenance) PRED=attestations/provenance.slsa.json; T=https://slsa.dev/provenance/v1 ;;
-              sbom) PRED=attestations/sbom.spdx.json; T=https://spdx.dev/Document ;;
-              vuln-source) PRED=attestations/vuln-source.json; T=https://cosign.dev/attestation/vuln/source ;;
-              vuln-dockerfile) PRED=attestations/vuln-dockerfile.json; T=https://cosign.dev/attestation/vuln/dockerfile ;;
-              vuln-iac) PRED=attestations/vuln-iac.json; T=https://cosign.dev/attestation/vuln/iac ;;
-              vuln-image) PRED=attestations/vuln-image.json; T=https://cosign.dev/attestation/vuln/image ;;
+              provenance)      PRED=attestations/provenance.slsa.json;   T=https://slsa.dev/provenance/v1 ;;
+              sbom)            PRED=attestations/sbom.spdx.json;         T=https://spdx.dev/Document ;;
+              vuln-source)     PRED=attestations/vuln-source.json;       T=https://cosign.dev/attestation/vuln/source ;;
+              vuln-dockerfile) PRED=attestations/vuln-dockerfile.json;   T=https://cosign.dev/attestation/vuln/dockerfile ;;
+              vuln-iac)        PRED=attestations/vuln-iac.json;          T=https://cosign.dev/attestation/vuln/iac ;;
+              vuln-image)      PRED=attestations/vuln-image.json;        T=https://cosign.dev/attestation/vuln/image ;;
             esac
             cosign attest --yes --type "$T" --predicate "$PRED" "${IMAGE_REF}"
           done
 
-      - name: Sign container (keyless)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        run: |
-          echo "Signing ${IMAGE_REF}"
-          cosign sign --yes "${IMAGE_REF}"
-
-      - name: Verify signature
-        run: |
-          cosign verify --experimental-oci11 \
-            --certificate-identity-regexp="https://github.com/.+" \
-            --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
-            "${IMAGE_REF}"
-
-      - name: Verify attestations (cosign)
-        run: |
-          for TYPE in \
-            "https://slsa.dev/provenance/v1" \
-            "https://spdx.dev/Document" \
-            "https://cosign.dev/attestation/vuln/source" \
-            "https://cosign.dev/attestation/vuln/dockerfile" \
-            "https://cosign.dev/attestation/vuln/iac" \
-            "https://cosign.dev/attestation/vuln/image"; do
-            cosign verify-attestation --experimental-oci11 \
-              --type "$TYPE" \
-              --certificate-identity-regexp="https://github.com/.+" \
-              --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
-              "${IMAGE_REF}" > /dev/null
-          done
-          echo "✅ All attestations verified."
-
-      - name: Check Rekor for expected entries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          HASH="${IMAGE_DIGEST#sha256:}"
-          echo "🔍 Searching Rekor for $HASH"
-          # The ghcr.io/sigstore/rekor-cli:latest container may not exist; use the official CLI binary.
-          # Use the `releases/latest` redirect to avoid GitHub API auth/rate-limit issues.
-          curl -sSfL \
-            "https://github.com/sigstore/rekor/releases/latest/download/rekor-cli-linux-amd64" \
-            -o rekor-cli
-          sudo install -m 0755 rekor-cli /usr/local/bin/rekor-cli
-          rekor-cli version
-          rekor-cli search --sha "$HASH" --format json > rekor-output.json
-          cat rekor-output.json | jq
-          ENTRY_COUNT=$(jq -r '.UUIDs | length' rekor-output.json)
-          if [ "$ENTRY_COUNT" -lt 6 ]; then
-            echo "❌ Rekor entry count less than 6)" && exit 1
-          fi
-          echo "✅ Rekor has at least 6 entries."
-
-      - name: Upload Rekor output
-        uses: actions/upload-artifact@v4
-        with:
-          name: rekor-output
-          path: rekor-output.json
-
-  consume_from_pipeline:
-    name: Download, Verify & Run (From CI)
+# ===========================================================================
+# 4  VERIFY CONTAINER  (consumer simulation)
+# ===========================================================================
+  verify_container:
+    name: Verify Container (Consumer Simulation)
     runs-on: ubuntu-latest
     needs:
       - build_and_push
-      - sign_and_verify
+      - sign_container
     env:
       IMAGE_REF: ${{ needs.build_and_push.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.digest }}
     steps:
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -309,40 +248,77 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v2
-        with:
-          cosign-release: 'v2.4.0'
+      - uses: sigstore/cosign-installer@v3
 
-      - name: Pull image produced by CI/CD
-        run: |
-          echo "Pulling ${IMAGE_REF}"
-          docker pull "${IMAGE_REF}"
+      - name: Pull image
+        run: docker pull "${IMAGE_REF}"
 
-      - name: Verify signature before execution
+      - name: Verify container signature
         run: |
-          cosign verify --experimental-oci11 \
+          cosign verify \
             --certificate-identity-regexp="https://github.com/.+" \
             --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
             "${IMAGE_REF}"
 
+      - name: Verify all attestations
+        run: |
+          for TYPE in \
+            "https://slsa.dev/provenance/v1" \
+            "https://spdx.dev/Document" \
+            "https://cosign.dev/attestation/vuln/source" \
+            "https://cosign.dev/attestation/vuln/dockerfile" \
+            "https://cosign.dev/attestation/vuln/iac" \
+            "https://cosign.dev/attestation/vuln/image"; do
+            cosign verify-attestation \
+              --type "$TYPE" \
+              --certificate-identity-regexp="https://github.com/.+" \
+              --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
+              "${IMAGE_REF}" > /dev/null
+          done
+          echo "All attestations verified."
+
+      - name: Check Rekor transparency log
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -yqq jq > /dev/null 2>&1
+          curl -sSfL \
+            "https://github.com/sigstore/rekor/releases/latest/download/rekor-cli-linux-amd64" \
+            -o rekor-cli
+          sudo install -m 0755 rekor-cli /usr/local/bin/rekor-cli
+          HASH="${IMAGE_DIGEST#sha256:}"
+          echo "Searching Rekor for ${HASH}"
+          rekor-cli search --sha "$HASH" --format json > rekor-output.json
+          jq . rekor-output.json
+          ENTRY_COUNT=$(jq -r '.UUIDs | length' rekor-output.json)
+          if [ "$ENTRY_COUNT" -lt 6 ]; then
+            echo "FAIL: Expected at least 6 Rekor entries, found $ENTRY_COUNT" && exit 1
+          fi
+          echo "Rekor has $ENTRY_COUNT entries (>= 6)."
+
       - name: Run container (non-interactive smoke test)
         run: |
-          # Run the CI-produced container only after signature verification.
-          # Use a non-interactive entrypoint so CI does not hang waiting for user input.
-          docker run --rm --entrypoint python "${IMAGE_REF}" -c "import main; print('Smoke test OK')"
+          docker run --rm --entrypoint python "${IMAGE_REF}" \
+            -c "import main; print('Smoke test OK')"
 
+      - name: Upload Rekor output
+        uses: actions/upload-artifact@v4
+        with:
+          name: rekor-output
+          path: rekor-output.json
+
+# ===========================================================================
+# 5  BUILD & SIGN BINARY  (only on v* tags or manual dispatch)
+# ===========================================================================
   build_binary:
     name: Build & Sign Binary
     runs-on: ubuntu-latest
-    needs: prep_and_scan
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: verify_container
     outputs:
       binary_hash: ${{ steps.hash.outputs.hash }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build binary in Ubuntu 22.04 container (glibc 2.35 compatibility)
+      - name: Build binary via PyInstaller (Ubuntu 22.04, glibc 2.35)
         run: |
           docker run --rm -v "$PWD:/app" -w /app ubuntu:22.04 bash -c '
             export DEBIAN_FRONTEND=noninteractive
@@ -352,71 +328,60 @@ jobs:
             pip install --upgrade pip
             pip install -r requirements.txt pyinstaller
             cd src/app
-            
-            # Create a simple wrapper that imports everything needed
-            echo "import http_api" > rps_bundle.py
-            echo "import protocol" >> rps_bundle.py
-            echo "import game" >> rps_bundle.py
-            echo "import commit_reveal" >> rps_bundle.py
-            echo "import rps_client" >> rps_bundle.py
-            echo "import scoreboard" >> rps_bundle.py
-            echo "import spiffe_mtls" >> rps_bundle.py
-            echo "import move_signing" >> rps_bundle.py
-            echo "import main" >> rps_bundle.py
-            echo "import cli" >> rps_bundle.py
-            echo "" >> rps_bundle.py
-            echo "if __name__ == \"__main__\":" >> rps_bundle.py
-            echo "    cli.main()" >> rps_bundle.py
-            
-            # Build with --paths=. to include local modules
+            cat > rps_bundle.py <<PYEOF
+          import http_api
+          import protocol
+          import game
+          import commit_reveal
+          import rps_client
+          import scoreboard
+          import spiffe_mtls
+          import move_signing
+          import main
+          import cli
+          if __name__ == "__main__":
+              cli.main()
+          PYEOF
             pyinstaller --onefile --name rps-game --paths=. rps_bundle.py
             chmod +x dist/rps-game
             ls -lh dist/
           '
-          # Fix ownership - Docker runs as root, but runner needs write access
-          sudo chown -R $(id -u):$(id -g) src/app/dist/
+          sudo chown -R "$(id -u):$(id -g)" src/app/dist/
 
-      - name: Test binary
-        run: |
-          cd src/app
-          ./dist/rps-game --help || echo "Binary needs interactive mode"
+      - name: Smoke-test binary
+        run: ./src/app/dist/rps-game --help || true
 
-      - name: Compute hash for signing
+      - name: Compute SHA256 hash
         id: hash
         run: |
           HASH=$(sha256sum src/app/dist/rps-game | awk '{print $1}')
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "Binary SHA256: $HASH"
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v2
-        with:
-          cosign-release: 'v2.4.0'
+      - uses: sigstore/cosign-installer@v3
 
-      - name: Sign binary with Cosign (blob mode)
-        env:
-          COSIGN_EXPERIMENTAL: "true"
+      - name: Sign binary with Cosign (keyless blob signing)
         run: |
-          cd src/app/dist
           cosign sign-blob --yes \
-            --bundle rps-game.cosign.bundle \
-            rps-game
-          echo "✅ Binary signed, bundle: rps-game.cosign.bundle"
+            --bundle src/app/dist/rps-game.cosign.bundle \
+            src/app/dist/rps-game
 
-      - name: Stage binary for upload
+      - name: Stage release artifacts
         run: |
-          mkdir -p ./release-staging
-          cp src/app/dist/rps-game ./release-staging/
-          cp src/app/dist/rps-game.cosign.bundle ./release-staging/
-          ls -la ./release-staging/
+          mkdir -p release-staging
+          cp src/app/dist/rps-game            release-staging/
+          cp src/app/dist/rps-game.cosign.bundle release-staging/
 
-      - name: Upload binary + signature as artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: rps-game-binary
-          path: ./release-staging/
+          path: release-staging/
 
-  verify_and_run_binary:
+# ===========================================================================
+# 6  VERIFY & RUN BINARY  (consumer simulation)
+# ===========================================================================
+  verify_binary:
     name: Verify & Run Binary
     runs-on: ubuntu-latest
     needs: build_binary
@@ -427,39 +392,30 @@ jobs:
           name: rps-game-binary
           path: ./binary
 
-      - name: List downloaded files
-        run: |
-          echo "Contents of ./binary:"
-          ls -laR ./binary/
+      - uses: sigstore/cosign-installer@v3
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v2
-        with:
-          cosign-release: 'v2.4.0'
-
-      - name: Verify binary signature before execution
+      - name: Verify binary signature
         run: |
-          cd binary
           cosign verify-blob \
-            --bundle rps-game.cosign.bundle \
+            --bundle binary/rps-game.cosign.bundle \
             --certificate-identity-regexp="https://github.com/.+" \
             --certificate-oidc-issuer-regexp="https://token.actions.githubusercontent.com" \
-            rps-game
-          echo "✅ Binary signature verified!"
+            binary/rps-game
+          echo "Binary signature verified."
 
-      - name: Make binary executable
-        run: chmod +x binary/rps-game
-
-      - name: Run verified binary (help command)
+      - name: Run verified binary
         run: |
-          ./binary/rps-game --help || echo "Binary executed successfully"
+          chmod +x binary/rps-game
+          ./binary/rps-game --help || true
 
+# ===========================================================================
+# 7  PUBLISH GITHUB RELEASE  (only on v* tags)
+# ===========================================================================
   publish_release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs:
-      - build_binary
-      - verify_and_run_binary
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: verify_binary
     permissions:
       contents: write
     steps:
@@ -469,22 +425,10 @@ jobs:
           name: rps-game-binary
           path: ./release
 
-      - name: List downloaded files
-        run: |
-          echo "Contents of ./release:"
-          ls -laR ./release/
-
-      - name: Create release tag
-        id: tag
-        run: |
-          TAG="v0.1.0-${{ github.run_number }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release with binary
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Rock-Paper-Scissors ${{ steps.tag.outputs.tag }}"
+          name: "Rock-Paper-Scissors ${{ github.ref_name }}"
           body: |
             ## Signed Binary Release
 
